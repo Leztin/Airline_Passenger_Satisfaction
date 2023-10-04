@@ -1,0 +1,346 @@
+---
+title: "Práctica I - Software SAS Miner"
+description: |
+  Aplicando regresión multivariante y red neuronal a Beijing Multi-Site Air-Quality Data Set
+author:
+  - name: Iván González Martín
+    affiliation: Universidad Complutense de Madrid
+    affiliation_url: https://ucm.es
+date: "`r Sys.Date()`"
+output:
+    distill::distill_article:
+        highlight: kate
+        colorlinks: true
+        code_folding: false
+        toc: true            
+        toc_depth: 3     
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include = FALSE}
+# Ajuste comunes de los chunk
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      cache = TRUE, res = 400)
+```
+
+# Contenido del dataset
+
+El dataset que se presenta para su análisis en esta práctica reúne información acerca de distintos **contaminantes y características del aire** de **12 distritos y barrios** del área metropolitana de **Beijing**. Los datos climatológicos provienen del **Centro Municipal de Monitorización Ambiental de Beijing**, y se incluyen las mediciones **horarias** desde el **1 de marzo de 2013** hasta el **28 de febrero de 2017**. Para certificar la calidad de los datos, la información climatológica de cada distrito se compara previamente con la estación meteorológica más cercana perteneciente a la Administración Meteorológica de China.
+
+Los **12 archivos CSV** que componen el dataset se han descargado del **UCI Machine Learning Repository** y no han sido modificados: [<https://archive.ics.uci.edu/ml/datasets/Beijing+Multi-Site+Air-Quality+Data>].
+
+# Objetivo
+
+El objetivo de esta práctica es **predecir** la variable **continua** `PM2.5` a través de las técnicas de **regresión multivariante** y de **red neuronal en modo regresión** con **selección de modelos**. **Para este segundo PDF, la práctica se resolverá con el software SAS Miner**.
+
+La **materia particulada 2.5** (`PM2.5`) es un tipo de partícula muy pequeña, suspendida en el aire, que tiene un **diámetro de menos de 2.5 micras** y que se utiliza usualmente como medida de **contaminación atmosférica**. La monitorización de este tipo de partículas en grandes ciudades es **fundamental** debido a que son lo suficientemente pequeñas como para ser **inhaladas en los pulmones** y llegar al **torrente sanguíneo**. Ello puede provocar **consecuencias nocivas para la salud**, especialmente para personas con afecciones respiratorias como el **asma** o **enfermedades cardíacas**.
+
+La exposición prolongada a niveles elevados de `PM2.5` también se ha relacionado con un **mayor riesgo** a padecer enfermedades cardiovasculares, respiratorias y cáncer de pulmón. Por esta razón, las regulaciones ambientales y de salud pública en la mayoría de países buscan **limitar la presencia de esta partícula en la atmósfera**.
+
+Los modelos que en esta práctica se proponen están enfocados a **predecir la variable continua** `PM2.5` en función del resto de características **meteorológicas y de calidad del aire** de las que se disponen.
+
+# Paquetes necesarios
+
+Necesitaremos los siguientes paquetes:
+
+```{r paquetes}
+# Paquetes
+library(tidymodels)
+library(tidyverse)
+library(parallel)
+library(doParallel)
+```
+
+# Fase 1: Dataset inicial, selección de variables y división de particiones
+
+Esta sección del trabajo se ha realizado **tras haber creado la receta** con todas las **modificaciones** sobre el dataset original en **R**, por lo que en SAS Miner, en lugar de emplear los datos originales, **se ha aprovechado ese dataset modificado para realizar la comparativa entre regresión y red neuronal**. Los **detalles más específicos** sobre los cambios que se han ido llevando a cabo en la receta (dummyficación, estandarización, etc.) se pueden consultar en el **primer PDF de la práctica** en donde se resuelve íntegramente con **lenguaje R**. En concreto, el dataset que se ha importado a SAS Miner tiene la siguiente forma:
+
+```{r}
+quality <- read_csv("/Users/leztin/Desktop/DATOS/quality.csv")
+glimpse(quality)
+```
+
+Como se puede observar, las variables **cualitativas** ya están **dummyficadas** y las **cuantitativas normalizadas**.
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Selección de variables.png")
+```
+
+Una vez cargado el dataset como **«fuente de datos»**, se introdujeron distintos nodos de **selección de variables** para que SAS eligiera **automáticamente** las más relevantes (en las que coincidieran los cuatro nodos). Se modificó el atributo de $R^2$ mínimo para que el **límite inferior** en la selección de variables fuera de $0.05$.
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Captura de pantalla 2023-04-06 a las 21.48.24.png")
+```
+
+Como se puede observar, finalmente seleccionamos las variables en las que **coincidían los cuatro métodos de selección implicados** (nodo «selección de variables», nodo «mínimos cuadrados parciales», nodo «incremento gradiente» y nodo «regresión»).Esta selección incluye **5 variables de las 22 que había en un inicio**. Estas variables son `C0`, `Temp`, `S02`, `Wind_Speed`, `03` y `Wind_Dir_North`, muy similares a las seleccionadas por el **step repetido con el Criterio de Información BIC incluido en el PDF en el que se resuelve la práctica con R**.
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/último.png")
+```
+
+Una vez seleccionadas las variables en la fuente de datos, realizamos las **particiones training-test** a través del nodo **«partición de datos»**. Concretamente dedicamos un **70 % a train**, un **0 % a validación** y un **30 % a test**. Además, generamos un total de **10 nodos de «partición de datos» adicionales con distintas semillas** (desde 12347 hasta 12357) a modo de **esquemas de muestreo** a la hora de comparar resultados.
+
+# Fase 2: Ejecución y tuneo de los algoritmos
+
+Una vez definidas las distintas particiones con las diferentes semillas, introducimos los nodos de **«regresión»** y de **«red neuronal»**.
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Captura de pantalla 2023-04-05 a las 13.49.58.png")
+```
+
+Con nuestro **set de 5 variables** preseleccionadas, se ha calculado el **número máximo de nodos** para tunear la red con un **tamaño muestral de 7573 observaciones**. Si dividimos el total de las **observaciones** entre **25** (el número máximo promedio de observaciones por parámetro teniendo 5 variables input), resultarían **303 parámetros como máximo**. Si aplicamos la fórmula $h = 303/(k + 2)$, siendo $k = 5$, Esto equivaldría a **43 nodos** para el tuneo como máximo. De esta manera, se introducen **7 nodos** de «red neuronal» del siguiente tamaño: predeterminado (**3 nodos**), **15 nodos**, **20 nodos**, **25 nodos**, **30 nodos**, **35 nodos** y **40 nodos**.
+
+Por otra parte, las **iteraciones** se han modificado a **1000** en todos los nodos **como máximo**, y los **algoritmos** y **funciones de activación** se han mantenido en **predeterminado**. Tras varias pruebas con diferentes algoritmos (Levenberg-Marquardt, Quasi-Newton, BackProp, RPROP, etc.), la opción predeterminada era la que **ofrecía mejores resultados** (47-48 de $RMSE$).
+
+# Fase 3: Comparación de los resultados
+
+Tras ejecutar todos los nodos que hemos definido, en esta sección **analizaremos los resultados que nos arrojan**. Mostraremos el $TRASE$ de los resultados de algunas semillas de aleatorización a modo de ejemplo.
+
+**Vista completa de la semilla 123457**
+
+```{r echo=FALSE, layout="l-body-outset", fig.width=13, fig.asp = .9}
+knitr::include_graphics("/Users/leztin/Desktop/Captura de pantalla 2023-04-05 a las 14.30.31.png")
+```
+
+**Semilla 12347:**
+
+```{r out.width = "50%", echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Semilla 1.png")
+```
+
+**Semilla 12348:**
+
+```{r out.width = "50%", echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Semilla 2.png")
+```
+
+**Semilla 12349:**
+
+```{r out.width = "50%", echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Semilla 3.png")
+```
+
+**Semilla 12350:**
+
+```{r out.width = "50%", echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Semilla 4.png")
+```
+
+**Semilla 12351:**
+
+```{r out.width = "50%", echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Semilla 5.png")
+```
+
+Como se puede observar en la tabla de la «visión completa», **los resultados de las redes neuronales en train mejoran el** $RMSE$ **de la regresión en 8 puntos**. Además, a medida que **aumentan los nodos**, el **error** de las redes neuronales **disminuye** (a costa de incrementar también su complejidad): la red neuronal de 15 nodos ofrece un RMSE de 45.83, mientras que la de 40 nodos es de 42.61.
+
+Sin embargo, **si nos trasladamos a test**, los resultados **empeoran** para las **redes de mayor complejidad**. Como suele ser habitual en los casos de redes con muchos nodos, **parecen sobreajustar en cierta medida sobre datos nuevos**. Si nos fijamos en el $TRASE$, **la red de 15 nodos suele ser la mejor para casi todas las semillas**, con un TRASE de **47 en media**. La regresión se mantiene en 50, mientras que el resto de redes de más de 20 nodos sobrepasan los 48 puntos. Como ya se ha comentado, **este proceso se ha repetido con hasta 10 semillas diferentes** y el rango de resultados permanece más o menos **estable** (el $TRASE$ general se sitúa siempre **entre 45 y 50** dependiendo principalmente del número de nodos).
+
+Ante estos resultados, y a modo de conclusión, yo me quedaría, o con la **red neuronal de 15 nodos** (menos complejidad, y mayor precisión en datos test); o con la **regresión**. Los **modelos clásicos** como la regresión son **menos complejos** que cualquier red neuronal, emplean menos parámetros, y, en este caso, **las diferencias en el error no son tan significativas**. En datos test, la regresión se posiciona con un error del 50.62, mientras que la mejor red neuronal consigue rebajar a 47.5. **Son tan solo tres puntos de diferencia en el error** a costa de reducir la complejidad del modelo en gran medida (de 211 a 13 parámetros que presenta la regresión). Dependiendo de las características específicas del modelo que se prefiera construir, podríamos decantarnos por cualquiera de los dos.
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Iteraciones.png")
+```
+
+En cuanto a las **iteraciones**, recordemos que dispusimos **1000 como máximo para cada red neuronal**. Como se puede observar en el gráfico, el $RMSE$ de todas las redes suele **estabilizarse en torno a las 200 iteraciones**. Por encima de este nivel, el error permanece **constante** o, incluso, **empeora**.
+
+# Fase 4: Tabla comparativa básica de todos los modelos construidos
+
+```{r eval=TRUE, echo=FALSE}
+Modelos <- 
+  tibble(Modelo = 
+           c("Reg. lineal Filtro SBF", "Reg. lineal Wrapper RFE", 
+             "Reg. lineal Algoritmo SES", "Reg. lineal Algoritmo MMPC", 
+             "Reg. lineal Algoritmo Boruta", "Reg. lineal Criterio AIC", 
+             "Reg. lineal Criterio BIC", "Reg. lineal Step Repetido AIC (set 1)", 
+             "Reg. lineal Step Repetido BIC (set 1)", 
+             "Reg. lineal Step Repetido AIC (set 2)", 
+             "Reg. lineal Step Repetido BIC (set 2)", "Reg. lineal Set de SAS Miner", 
+             "Red neuronal (sin tunear) Criterio BIC", 
+             "Red neuronal (sin tunear) Step Repetido Criterio BIC (set 1)", 
+             "Red neuronal tuneada Criterio BIC", 
+             "Red neuronal tuneada Step Repetido Criterio BIC (set 1)", 
+             "Red neuronal Set de SAS Miner"),
+         Variables = c(16, 8, 6, 6, 12, 14, 9, 12, 6, 12, 9, 5, 9, 6, 9, 6, 5),
+         Size = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, 15, 15, 20, 25, 15),
+         Decay = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, 0.01, 0.001, 0.01, 0.1, 0.1),
+         Iter = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, 100, 100, 300, 1000, 300),
+         RMSE = 
+           c(48.1268, 48.28023, 49.29362, 48.37444, 48.15084, 48.14271, 48.2209, 48.18784,
+             48.29492, 48.17972, 48.2442, 50.6255, 45.96425, 45.95087, 45.59003, 45.40948,
+             47.75352),
+         Rsquared = 
+           c(0.6211469, 0.6187292, 0.6024187, 0.6171964, 0.6207601, 0.620884, 0.6196589,
+             0.6201897, 0.6184985, 0.6203181, 0.6192797, 0.6012239, 0.6541997, 0.6544157,
+             0.6598896, 0.66258, 0.6347654),
+         MAE = 
+           c(31.62938, 31.74797, 33.1781, 31.83755, 31.64198, 31.65135, 31.68954, 31.64887,
+             31.69963, 31.67154, 31.70714, NA, 29.21047, 29.10019, 29.01463, 28.8302, NA),
+         RMSESD = 
+           c(1.824305, 1.809805, 1.700602, 1.806547, 1.81573, 1.815765, 1.817478, 1.822174,
+             1.826474, 1.823605, 1.812094, NA, 1.744605, 1.757652, 1.797445, 1.758132, NA),
+         RsquaredSD = 
+           c(0.02302185, 0.02294294, 0.0216726, 0.02290435, 0.02295528, 0.02296743, 
+             0.02314721, 0.02317782, 0.02330178, 0.02308826, 0.02302318, NA, 0.02026567,
+             0.0202516, 0.0209876, 0.02045186, NA),
+         MAESD = 
+           c(0.5884595, 0.586313, 0.5869939, 0.6096542, 0.582593, 0.5809674, 0.5864442, 
+             0.5800286, 0.5875319, 0.581548, 0.587664, NA, 0.5698941, 0.5993611, 0.6227855,
+             0.5957253, NA))
+```
+
+```{r layout="l-body-outset"}
+knitr::kable(Modelos, row.names = FALSE, align = "c")
+```
+
+```{r}
+paged_table(Modelos)
+```
+
+A modo de conclusión, en la tabla anterior se muestran para su consulta **los resultados de todos los modelos** que se han ido generando **tanto en R como en SAS Miner** sobre este dataset. Como ya se comentó, el mejor modelo parece ser el de la **«Red neuronal tuneada - step repetido Criterio BIC (set 1)»**, con 6 variables, un $RMSE$ de $45.40948$ y un $R^2$ de $66.26$ %.
+
+Como sección extra, efectuaremos a continuación una **comparación básica** de la **performance** entre los resultados generados a través de **SAS Miner** y los generados previamente a través de **R** a partir de un **esquema simple training-test**.
+
+# Extra: Comparación de la performance entre SAS y R
+
+Para la **comparación de la performance** entre los resultados obtenidos desde **ambos softwares**, lo que haremos será seguir el procedimiento detallado en el archivo `comparar SAS y R.R`.
+
+## Creación de las particiones train y test
+
+Para no tener que realizar de nuevo todo el procesado del dataset original, **se empleará el dataset tratado del primer PDF de la práctica**. Este dataset adquiere la siguiente forma:
+
+```{r}
+glimpse(quality)
+```
+
+Realizaremos a continuación las **particiones** sobre este dataset. Destinaremos el **70 % a train** y el **30 % a test**. Como el dataset cuenta con **7573 observaciones**, el grupo de **entrenamiento** estará compuesto por **5302 observaciones**, mientras que el conjunto **test** contará con **2271 observaciones**.
+
+```{r}
+# Fijamos semilla
+set.seed(12345)
+
+# Calculamos el tamaño muestral del grupo test
+sample_size <-
+  floor(0.3 * nrow(quality))
+
+# Generamos los índices para la partición
+indices <-
+  sample(seq_len(nrow(quality)), size = sample_size)
+
+# Creamos las particiones
+test <-
+  quality[indices,]
+train <-
+  quality[-indices,]
+
+# Las pasamos a dataframe. Las funciones posteriores no admiten tibble.
+test <- test |> 
+  as.data.frame()
+train <- train |> 
+  as.data.frame()
+```
+
+Una vez realizadas las particiones, **generamos los archivos** para poder subirlos a **SAS Miner**.
+
+```{r eval=FALSE}
+write_csv(train, "train.csv")
+write_csv(test, "test.csv")
+```
+
+## Comparación de la performance entre SAS Miner y R
+
+Con las **particiones cargadas** en R y en SAS Miner, recopilaremos los hiperparámetros del mejores modelo obtenido en R. Lo **entrenaremos** con la **partición train** y realizaremos las **predicciones** sobre la **partición test**.
+
+### Resultados del modelo en R
+
+Tal y como se indica en el **primer PDF**, el modelo finalmente seleccionado fue la **red neuronal con las variables proporcionadas por el método del step repetido basado en el Criterio BIC** (6 variables) y con la siguiente configuración de hiperparámetros: `size = 25`, `decay = 0.1`, e `iter = 1000`. A continuación aplicaremos este modelo a los datos de entrenamiento para, posteriormente, calcular las **predicciones sobre datos test**.
+
+```{r eval=FALSE, cache = TRUE}
+library(caret)
+
+#Fijamos semilla
+set.seed(12346)
+
+# Inicializamos la paralelización
+clusters <- detectCores() - 1
+make_cluster <- makeCluster(clusters)
+registerDoParallel(make_cluster)
+
+# Generamos el grid y los parámetros de control
+nnetgrid <- 
+  expand.grid(size=c(25), decay=c(0.1), bag=F)
+
+control <- 
+  trainControl(method = "repeatedcv", number = 4, 
+               repeats = 5, savePredictions = "all")
+
+# Lanzamos el modelo
+rednnet <- 
+  train(PM2_5~CO + Temp + SO2 + Hour_Non.working.hour + Rain_Yes + Wind_Dir_South,
+        data = train, method = "avNNet", 
+        linout = TRUE, trControl = control,
+        repeats = 5, tuneGrid = nnetgrid, 
+        maxit = 1000, trace = FALSE)
+  
+# Calculamos las predicciones sobre datos test
+predicciones <- 
+  predict(rednnet, test)
+
+# Añadimos las predicciones al grupo test y calculamos el error
+completo <- 
+  cbind(test, predicciones)
+
+completo$error <- 
+  (completo$PM2_5-completo$predicciones)^2
+
+MSE <- mean(completo$error)
+RMSE <- sqrt(MSE)
+
+# Finalizamos la paralelización
+stopCluster(make_cluster)
+registerDoSEQ()
+```
+
+A la vista de los resultados, este modelo en **R** presenta un $MSE$ de **2352.3** y un $RMSE$ de **48.5** sobre datos test. Comprobemos ahora estos valores en SAS Miner.
+
+### Resultados del modelo en SAS Miner
+
+Para reproducir el modelo en **SAS Miner**, lo primero que haremos será **cargar los archivos train y test** como **fuentes de datos**. Tras ello, descartaremos las variables que no están incluidas en nuestro modelo original: nos quedamos únicamente con **6 variables más la objetivo**. 
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Library/Mobile Documents/com~apple~CloudDocs/Universidad/Máster/Segundo cuatrimestre/Técnicas de Machine Learning/Práctica 1/Enterprise Miner/Imágenes/Variables seleccionadas.png")
+```
+
+Una vez preparadas nuestras dos fuentes de datos, acoplamos los **nodos de «red neuronal» y «puntuación»** a la **fuente de datos «train»**. A la **fuente de datos «test»** la unimos con el **rol de puntuación** al nodo del mismo nombre para obtener las puntuaciones sobre esa fuente de datos. 
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Library/Mobile Documents/com~apple~CloudDocs/Universidad/Máster/Segundo cuatrimestre/Técnicas de Machine Learning/Práctica 1/Enterprise Miner/Imágenes/Panorámica general.png")
+```
+
+En cuanto a los **parámetros del nodo de la red neuronal**, se dispusieron igual que en la construcción del modelo en R. Concretamente **25 nodos**, **1000 iteraciones**, y un **decay o learning rate** de **0.1**. Para cambiar el learning rate, se optó por modificar el algoritmo predeterminado a **Back Prop**, que es uno de los pocos que **permiten alterar este parámetro**. 
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Library/Mobile Documents/com~apple~CloudDocs/Universidad/Máster/Segundo cuatrimestre/Técnicas de Machine Learning/Práctica 1/Enterprise Miner/Imágenes/Optimización de la red.png")
+```
+
+Una vez ejecutado todo, **se extrajeron las puntuaciones** a través del nodo **«exportar código de puntuación»**, se exportaron a formato sas7bdat, y **se volvieron a importar como nueva fuente de datos** (SCOREDATA).
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Library/Mobile Documents/com~apple~CloudDocs/Universidad/Máster/Segundo cuatrimestre/Técnicas de Machine Learning/Práctica 1/Enterprise Miner/Imágenes/Completo.png")
+```
+
+Con las **predicciones** ya incluidas como una nueva variable dentro del dataset, se conectó con el nodo **«transformar variables»** y se calculó la siguiente fórmula para obtener el $MSE$: $(P\_PM2.5-PM2.5)^2$.
+ 
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Library/Mobile Documents/com~apple~CloudDocs/Universidad/Máster/Segundo cuatrimestre/Técnicas de Machine Learning/Práctica 1/Enterprise Miner/Imágenes/Fórmula.png")
+```
+ 
+Finalmente, el valor del $MSE$ en SAS Miner fue de **2177.783**. Por su parte, el $RMSE$ es igual a **46.67**, valor **inferior en dos puntos al obtenido a través del método en R (48.5)**. En esta ocasión, los resultados a través de las técnicas que emplea el software SAS Miner son **ligeramente superiores**.
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Library/Mobile Documents/com~apple~CloudDocs/Universidad/Máster/Segundo cuatrimestre/Técnicas de Machine Learning/Práctica 1/Enterprise Miner/Imágenes/Valores finales.png")
+```
+
+<CENTER>**¡Muchas gracias por la atención!**</CENTER>

@@ -1,0 +1,1654 @@
+---
+title: "Práctica I - Software R"
+description: |
+  Aplicando regresión multivariante y red neuronal con selección de modelos a Beijing Multi-Site Air-Quality Data Set
+author:
+  - name: Iván González Martín
+    affiliation: Universidad Complutense de Madrid
+    affiliation_url: https://ucm.es
+date: "`r Sys.Date()`"
+output:
+    distill::distill_article:
+        highlight: kate
+        colorlinks: true
+        code_folding: false
+        toc: true            
+        toc_depth: 3
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include = FALSE}
+# Ajuste comunes de los chunk
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      cache = TRUE, res = 400)
+```
+
+# Contenido del dataset
+
+El dataset que se presenta para su análisis en esta práctica reúne información acerca de distintos **contaminantes y características del aire** de **12 distritos y barrios** del área metropolitana de **Beijing**. Los datos climatológicos provienen del **Centro Municipal de Monitorización Ambiental de Beijing**, y se incluyen las mediciones **horarias** desde el **1 de marzo de 2013** hasta el **28 de febrero de 2017**. Para certificar la calidad de los datos, la información climatológica de cada distrito se compara previamente con la estación meteorológica más cercana perteneciente a la Administración Meteorológica de China.
+
+Los **12 archivos CSV** que componen el dataset se han descargado del **UCI Machine Learning Repository** y no han sido modificados: [<https://archive.ics.uci.edu/ml/datasets/Beijing+Multi-Site+Air-Quality+Data>].
+
+# Objetivo
+
+El objetivo de esta práctica es **predecir** la variable **continua** `PM2.5` a través de las técnicas de **regresión multivariante** y de **red neuronal en modo regresión** con **selección de modelos** (BIC, AUC, etc.). **Para este primer PDF, la práctica se resolverá utilizando el software de R**.
+
+La **materia particulada 2.5** (`PM2.5`) es un tipo de partícula muy pequeña, suspendida en el aire, que tiene un **diámetro de menos de 2.5 micras** y que se utiliza usualmente como medida de **contaminación atmosférica**. La monitorización de este tipo de partículas en grandes ciudades es **fundamental** debido a que son lo suficientemente pequeñas como para ser **inhaladas en los pulmones** y llegar al **torrente sanguíneo**. Ello puede provocar **consecuencias nocivas para la salud**, especialmente para personas con afecciones respiratorias como el **asma** o **enfermedades cardíacas**. 
+
+La exposición prolongada a niveles elevados de `PM2.5` también se ha relacionado con un **mayor riesgo** a padecer enfermedades cardiovasculares, respiratorias y cáncer de pulmón.
+Por esta razón, las regulaciones ambientales y de salud pública en la mayoría de países buscan **limitar la presencia de esta partícula en la atmósfera**. Los modelos que en esta práctica se proponen están enfocados a **predecir la variable continua** `PM2.5` en función del resto de características **meteorológicas y de calidad del aire** de las que se disponen.
+
+# Paquetes necesarios
+
+Para llevar a cabo nuestro objetivo, necesitaremos los siguientes paquetes:
+
+```{r paquetes}
+# Paquetes
+library(tidymodels) # Depuración datos
+library(tidyverse) # Modelos
+library(outliers) # Outliers
+library(parallel) # Paralelización
+library(doParallel) # Paralelización
+library(performance)
+library(ggthemes)
+library(glue)
+library(ggrepel)
+library(caret)
+library(gam)
+library(randomForest)
+library(Boruta)
+library(MXM)
+```
+
+# Datos
+
+Los datos que usaremos provienen de doce dataset correspondientes a **doce distritos del área metropolitana de Beijing**, a saber: Aotizhongxin, Changping, Dingling, Dongsi, Guanyuan, Gucheng, Huairou, Nongzhanguan, Shunyi, Tiantan, Wanliu, y Wanshouxigong. Para el análisis exploratorio, **bindearemos** los doce dataset para poder analizar el **total de las observaciones**.
+
+```{r}
+# Directorio donde están los archivos CSV
+dir <- 
+  "/Users/leztin/Library/Mobile Documents/com~apple~CloudDocs/Universidad/Máster/Segundo cuatrimestre/Técnicas de Machine Learning/Práctica 1/Dataset 3 - Calidad Aire Beijing"
+
+# Función para leer un archivo CSV y devolver un tibble
+read_csv_file <- 
+  function(filepath) {
+  read_csv(filepath, col_types = cols())
+    }
+
+# Lectura y unión de los 12 archivos CSV en un único tibble
+quality_complete <- 
+  list.files(dir, pattern = ".csv") |> 
+  map_df(~read_csv_file(file.path(dir, .)))
+```
+
+# Análisis exploratorio preliminar
+
+Antes de tomar cualquier decisión con los datos, lo primero que haremos será **echar un vistazo numérico** a cómo se comportan las variables.
+
+### Variables
+
+Nuestro dataset cuenta con **420 768 registros** y se compone de las siguientes variables:
+
+```{r}
+glimpse(quality_complete)
+```
+
+| Variable |              Significado              | Variable  |                            Significado                             |
+|:----------------:|:-----------------:|:----------------:|:----------------:|
+|   `No`   |        Identificador numérico         |  `year`   |                    Año de los datos de la fila                     |
+| `month`  |      Mes de los datos de la fila      |   `day`   |                    Día de los datos de la fila                     |
+|  `hour`  |     Hora de los datos de la fila      |  `PM2.5`  |               Concentración de $PM2.5$ ($\mu g/m^3$)               |
+|  `PM10`  | Concentración de $PM10$ ($\mu g/m^3$) |   `SO2`   |               Concentración de $SO_2$ ($\mu g/m^3$)                |
+|  `NO2`   | Concentración de $NO_2$ ($\mu g/m^3$) |   `CO`    |                Concentración de $CO$ ($\mu g/m^3$)                 |
+|   `O3`   | Concentración de $O_3$ ($\mu g/m^3$)  |  `TEMP`   |              Temperatura atmosférica (grados Celsius)              |
+|  `PRES`  |       Presión atmosférica (hPa)       |  `DEWP`   |           Temperatura de punto de rocío (grados Celsius)           |
+|  `RAIN`  |         Precipitación ($mm$)          |   `wd`    |                        Dirección del viento                        |
+|  `WSPM`  |      Velocidad del aire ($m/s$)       | `station` | Nombre del distrito desde el que se monitoriza la calidad del aire |
+
+### Distribución de la variable objetivo
+
+El objetivo será **predecir los niveles de contaminación en función del resto de características meteorológicas**, por lo que `PM2.5` será nuestra **variable objetivo**.
+En primer lugar, comprobaremos cómo se **distribuyen los valores de esta variable**.
+
+```{r layout="l-body-outset", fig.width=13, fig.asp = .6}
+quality_complete |> 
+  filter(PM2.5 < 500) |> 
+  ggplot(aes(x = PM2.5)) +
+  geom_density(alpha = .8, fill="#EB9891") +
+  labs(title = "Distribución de la materia particulada 2.5", x = "Concentración de PM2.5 (ug/m^3)", y = NULL) +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5)) + 
+  scale_x_continuous(labels = comma_format(big.mark = " ", decimal.mark = ",")) +
+  scale_y_continuous(labels = comma_format(big.mark = " ", decimal.mark = ",")) +
+  geom_vline(aes(xintercept = mean(PM2.5, na.rm = T), linetype = "Media"), colour = "black", size = .8) +
+  geom_vline(aes(xintercept = median(PM2.5, na.rm = T), linetype = "Mediana"), colour = "black", size = .8) + 
+  scale_linetype_manual(name = "Medidas", values = c(Media = "solid", Mediana = "dotted"))
+```
+
+Encontramos bastantes valores outliers que distorsionan la distribución a partir de los 550 microgramos por metro cúbico. Aún así, se puede observar cómo **la distribución es muy asimétrica**, por lo que la **mediana** será la medida **más representativa**. Esta se encuentra en torno a los **55 microgramos por metro cúbico**.
+
+Para hacernos una idea de la dimensión de estas cifras, en virtud de la Directiva 2008/50/CE del Parlamento Europeo y del Consejo, de 21 de mayo de 2008, relativa a la calidad del aire ambiente y a una atmósfera más limpia en Europa, el **límite anual en Europa para PM2.5** en aire ambiente se sitúa en los **20 microgramos por metro cúbico** a partir del 1 de enero de 2020. Los valores medios y medianos de este componente en todos los distritos de Beijing **duplican**, como mínimo, ese límite.
+
+# Fase 1: Exploración de los datos
+
+## Problemas de codificación
+
+### Exploración inicial de valores ausentes
+
+Tras esta pequeña aproximación al dataset, comienza la **primera fase** de la metodología SEMMA para el depurado de nuestros datos. En este primer apartado observaremos a *grosso modo* si existen problemas de **codificación** en el dataset. Lo que más llama la atención con respecto a la codificación de los registros de ciertas variables es el **número de datos ausentes que presenta el dataset**.
+
+```{r}
+ausentes <- 
+  apply(quality_complete, 2, function(x) sum(is.na(x)))
+
+ausentes_tb <- 
+  tibble(Variable = names(quality_complete), Ausentes = ausentes) |> 
+  filter(Ausentes > 0)
+ausentes_tb
+
+ausentes_tb |> 
+  ggplot(aes(x = Variable, y = Ausentes)) +
+  geom_col(position = "dodge", fill="#EB9891", color = "black") +
+  labs(title = "Nº de valores ausentes por variable", x = "Variable", 
+       y = "Cantidad de valores ausentes") +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 9), plot.title = element_text(hjust = 0.5),
+        axis.title.x = element_text(vjust=-0.5), axis.title.y = element_text(vjust=2))
+```
+
+Como se puede observar, **12 de las 18 variables** presenta **algún dato ausente**, siendo `NO2`, `CO` y `O3` las variables que más incluyen (entre el **2 y el 5 % del total de los registros**).
+En fases posteriores, cuando se elabore la receta que aplicaremos a los algoritmos, **imputaremos a cada variable el valor que le corresponda** (media o mediana para las variables numéricas, o moda para las categóricas). Para que la imputación sea lo más precisa posible, como el dataset dispone de la variable `month`, lo más probable es que se calculen esos valores en función de **la media o de la mediana de cada mes**.
+
+### Identificación de las variables
+
+Por cuestiones de identificación, vamos a **cambiar el nombre** a algunas de nuestras variables.
+
+```{r}
+quality <-
+  quality_complete |> 
+  rename(ID = No, Year = year,
+         Month = month, Day = day,
+         Hour = hour, Temp = TEMP,
+         Pres = PRES, Dew_Point = DEWP,
+         Rain = RAIN, Wind_Dir = wd,
+         Wind_Speed = WSPM, Station = station)
+```
+
+### Variables tipo texto, variables numéricas y factores
+
+En este apartado echaremos un vistazo a la **tipología** de nuestras variables. Comenzaremos con las **variables tipo texto**:
+
+```{r}
+quality |>  
+  select(where(is.character)) |>
+  glimpse()
+```
+
+En este caso, nuestro dataset contiene tan solo **2 variables tipo texto**. Como ninguna de las dos es ordinal, las transformaremos directamente a **factor**.
+
+```{r}
+quality <-
+  quality |> 
+  mutate_if(~!is.numeric(.), as.factor)
+```
+
+Daremos un repaso también a las **numéricas**.
+
+```{r}
+quality |>  
+  select(where(is.numeric)) |>
+  glimpse()
+```
+
+Todas las **variables numéricas** están **codificadas correctamente**.
+
+## Variables cuantitativas
+
+Una vez asignado a cada variable su **tipología** correspondiente, pasaremos a analizar las **variables cuantitativas** del dataset.
+Se analizará ante todo cómo **afecta** cada variable a nuestra **variable objetivo** (`PM2.5`).
+Este análisis servirá, ante todo, para **recategorizar las predictoras numéricas** a la hora de crear la receta para los algoritmos seleccionados.
+
+### Colinealidad
+
+Antes de nada, comprobaremos los posibles **problemas de colinealidad** entre las predictoras numéricas con tal de **eliminar** las que repitan información.
+También, al tener una **variable continua** como objetivo, comprobaremos cuáles de las predictoras numéricas están **más correlacionadas con ella**, con tal de **mantenerlas** y **analizarlas en profundidad**.
+
+```{r}
+library(corrr)
+cor_matrix <- 
+  quality |> select(-PM10) |> select(where(is.numeric)) |> cor(use = "pairwise.complete.obs", method = "pearson")
+```
+
+```{r layout="l-body-outset", fig.width=13, fig.asp = .9}
+library(corrplot)
+cor_matrix |>
+  corrplot(method = "number", tl.cex = 0.55, number.cex = 0.7, type = "lower")
+```
+
+Como se puede observar, existen bastantes variables con **correlaciones superiores a 0.4**.
+Vamos a echarles un vistazo:
+
+```{r layout="l-body-outset", fig.width=13, fig.asp = .9}
+# Seleccionar solo las entradas de la matriz de correlación con valores mayores a 0.4
+cor_matrix[-0.4 <= cor_matrix & cor_matrix <= 0.4] <- NA
+
+# Creamos el gráfico de correlación
+corrplot(cor_matrix, method = "number", type = "lower",tl.cex = 0.55, number.cex = 0.7, na.label=" ")
+```
+
+En primer lugar, a partir del gráfico podemos observar como las variables `PM10`, `SO2`, `NO2`, `CO`, y `Wind_Speed` son las que mantienen **correlaciones más fuertes** con nuestra **variable objetivo** `PM2.5`. La variable `PM10` mide exactamente lo mismo que nuestra variable objetivo, pero con una limitación en el tamaño de las partículas más laxa: **cuantifica materia particulada del diámetro de menos de 10 micras**. Para evitar problemas de colinealidad con nuestra dependiente, la **eliminaremos directamente**.
+
+En segundo lugar, analizaremos las **correlaciones** entre las propias predictoras con tal de **deshacernos de información redundante**.
+Nos desharemos de aquellas variables que mantengan correlaciones superiores a 0.7 con otras variables.
+**De un par de variables muy correlacionadas, eliminaremos la que menor correlación mantenga con nuestra objetivo** (`PM2.5`).
+
+-   La variable `NO2` mantiene una correlación de **0.71** con `CO`. Ante este par, eliminaremos `NO2`.
+-   La variable `Temp` mantiene una correlación de **-0.81** con `Pres`. Ante este par, eliminaremos `Pres`.
+-   La variable `Temp` mantiene una correlación de **0.82** con `Dew_Point`. Ante este par, eliminaremos `Dew_Point`.
+
+```{r}
+quality <- 
+  quality |> 
+  select(-c(PM10, NO2, Pres, Dew_Point))
+
+quality |> 
+  select(where(is.numeric)) |> 
+  glimpse()
+```
+
+### Variable ID
+
+```{r}
+quality |> 
+  summarise(min_lead = min(ID), max_lead = max(ID))
+```
+
+Como se puede observar, la variable `Id` es un **id del número de registros por hora y día** que se incluyen en el dataset.
+Como **no tiene interés** alguno a fin de predecir nuestra variable objetivo, en la fase de modificación **eliminaremos** esta variable.
+
+### Variables Year, Month, Day y Hour
+
+```{r}
+sum1 <- quality |> 
+  summarise(Variable = "Year", min_lead = min(Year), max_lead = max(Year))
+
+sum2 <- quality |> 
+  summarise(Variable = "Month", min_lead = min(Month), max_lead = max(Month))
+
+sum3 <- quality |> 
+  summarise(Variable = "Day", min_lead = min(Day), max_lead = max(Day))
+
+sum4 <- quality |> 
+  summarise(Variable = "Hour", min_lead = min(Hour), max_lead = max(Hour))
+
+rbind(sum1, sum2, sum3, sum4)
+```
+
+Las variables `Year`, `Month`, `Day` y `Hour` miden los **instantes temporales** de las mediciones desde **marzo del año 2013** hasta **febrero del 2017**.
+Veamos cómo evoluciona nuestra objetivo (`PM2.5`) en función de estos **instantes temporales**.
+
+```{r layout="l-body-outset", fig.width=15, fig.asp = .6}
+a1 <- quality |> 
+  group_by(Year, Hour) |> 
+  summarise(Median_PM25 = median(PM2.5, na.rm = TRUE)) |> 
+  ggplot(aes(x = factor(Hour), y = Median_PM25, color = factor(Year), group = Year)) +
+  geom_line(size = 0.5) + 
+  geom_point(aes(text = paste("Año:", Year, "<br>Hora:", Hour, "<br>Nivel de PM2.5:", 
+                              Median_PM25)), size = 1) +
+  theme_minimal() +
+  labs(title = "Distribución del contaminante PM2.5 en función de la hora", 
+                                                      x = "Mes", y = "Concentración de PM2.5 (ug/m^3)", color = "Año") + 
+  theme(text = element_text(face = "bold"), plot.title = element_text(hjust = 0.5))
+
+a2 <- quality |> 
+  mutate(Day = as.Date(paste(Year, Month, Day, sep = "-")),
+         Day = factor(weekdays(Day, abbreviate = F), 
+                      levels = c("Monday", "Tuesday", "Wednesday", "Thursday", 
+                                 "Friday", "Saturday", "Sunday"),
+                      ordered = TRUE)) |> 
+  group_by(Year, Day) |> 
+  summarise(Median_PM25 = median(PM2.5, na.rm = TRUE)) |>
+  ggplot(aes(x = Day, y = Median_PM25,color = factor(Year), group = Year)) +
+  geom_line(size = 0.5) + 
+  geom_point(aes(text = paste("Año:", Year, "<br>Día:", Day, "<br>Nivel de PM2.5:", 
+                              Median_PM25)), size = 1) +
+  theme_minimal() +
+  labs(title = "Distribución del contaminante PM2.5 en función del día", 
+                                                      x = "Mes", y = "Concentración de PM2.5 (ug/m^3)", color = "Año") + 
+  theme(text = element_text(face = "bold"), plot.title = element_text(hjust = 0.5))
+
+a3 <- quality |> 
+  mutate(Month = factor(Month, levels = 1:12, labels = c("Enero", "Febrero", "Marzo", "Abril", "Mayo",
+                                                    "Junio", "Julio", "Agosto", "Septiembre", "Octubre",
+                                                    "Noviembre", "Diciembre"))) |>
+  group_by(Year, Month) |> 
+  summarise(Median_PM25 = median(PM2.5, na.rm = TRUE)) |> 
+  ggplot(aes(x = factor(Month), y = Median_PM25, color = factor(Year), group = Year)) +
+  geom_line(size = 0.5) + 
+  geom_point(aes(text = paste("Año:", Year, "<br>Mes:", Month, "<br>Nivel de PM2.5:", 
+                              Median_PM25)), size = 1) +
+  scale_x_discrete(guide = guide_axis(n.dodge = 2)) + 
+  theme_minimal() +
+  labs(title = "Distribución del contaminante PM2.5 en función del año", 
+                                                      x = "Mes", y = "Concentración de PM2.5 (ug/m^3)", color = "Año") + 
+  theme(text = element_text(face = "bold"), plot.title = element_text(hjust = 0.5))
+
+Rmisc::multiplot(a1, a2, a3)
+```
+
+Algunos comentarios a la vista de los gráficos:
+
+-   Respecto del gráfico que relaciona la variable `Month` con los niveles medianos del contaminante `PM2.5`, no se observa *a priori* una **relación demasiado fuerte** entre ambas variables: los niveles del contaminante parecen distribuirse de una manera **más o menos uniforme entre todos los meses del año**.
+    **2014** parece el año en el que los niveles del contaminante se encuentran **más elevados**, superando en varias ocasiones los **70 microgramos por metro cúbico**.
+    Recordemos que, según los Valores Guía de protección para la salud de la OMS, para valores medios anuales, los **10 microgramos por metro cúbico** serían el nivel más bajo a partir del cual se ha detectado **asociación entre efectos cardiopulmonares y mortalidad por cáncer de pulmón**.
+    Para niveles de **35** $\mu g/m^3$ este riesgo **aumenta en un 15 %**.
+    Si bien observando el gráfico no parece haber meses en los que los niveles de `PM2.5` destaquen por encima del resto, a nivel anual sí que se puede observar cierta **tendencia hacia la disminución de partículas en suspensión**, probablemente gracias a las medidas aprobadas en las regiones de Beijing, Tianjin y Hebei para el control de las calderas de carbón y la reestructuración industrial de las zonas circundantes ([<https://bit.ly/3yHitIj>]).
+
+-   Si analizamos el gráfico que relaciona la variable `Day` con los niveles medianos del contaminante `PM2.5`, tampoco se observan **relaciones demasiado fuertes entre los distintos días de la semana**, al menos para los años previos a 2017.
+    En el caso del **año 2017**, sí que se puede observar cierto **incremento** de `PM2.5` durante los **días laborables**, sobre todo **los martes y los miércoles**.
+    A partir del jueves, los niveles del contaminante **disminuyen**, con un pequeño repunte los sábados.
+
+-   Por último, si analizamos el gráfico que relaciona la variable `Hour` con los niveles medianos del contaminante `PM2.5`, **aquí sí que se pueden observar incrementos en los niveles del contaminante en función de las horas del día** durante todos los años, aunque aún más pronunciados para **2017**.
+    Durante las **horas de actividad** (en el gráfico, desde la hora 18 hasta la 4), se puede observar claramente un **incremento progresivo** en los niveles de `PM2.5` con **picos que superan los 60** $\mu g/m^3$.
+    Para las horas en las que la mayoría de la población duerme, los niveles llegan a caer **hasta los 25** $\mu g/m^3$.
+
+### Variables SO2, CO y O3
+
+```{r}
+sum1 <- quality |> 
+  drop_na() |> 
+  summarise(Variable = "SO2", min_lead = min(SO2), max_lead = max(SO2))
+
+sum2 <- quality |> 
+  drop_na() |>  
+  summarise(Variable = "CO", min_lead = min(CO), max_lead = max(CO))
+
+sum3 <- quality |> 
+  drop_na() |> 
+  summarise(Variable = "O3", min_lead = min(O3), max_lead = max(O3))
+
+rbind(sum1, sum2, sum3)
+```
+
+Las variables `SO2`, `CO` y `O3` miden distintos **gases contaminantes** que contribuyen al incremento de la materia particulada en suspensión:
+
+-   El **dióxido de azufre** ($SO_2$) es un gas que se origina sobre todo durante la **combustión de carburantes fósiles que contienen azufre** (petróleo, combustibles sólidos), llevada a cabo sobre todo en los procesos industriales de alta temperatura y de generación eléctrica.
+
+-   El **monóxido de carbono** ($CO$) es un gas sin color ni olor emitido como consecuencia de la **combustión incompleta** de **carburantes fósiles** y de **biocombustibles**.
+
+-   El **gas ozono** ($O_3$) tiene un efecto positivo en la estratosfera (a unos 10-50 km de la superficie terrestre), ya que protege de la radiación ultravioleta. Sin embargo, a cotas inferiores, en la **troposfera** (la capa de la atmósfera en contacto con la tierra), se convierte en un **contaminante** que actúa como un potente y agresivo **agente oxidante**.
+
+Veamos cómo se comporta nuestra objetivo (`PM2.5`) en función de estos **gases contaminantes**.
+
+```{r layout="l-body-outset", fig.width=13, fig.asp = .9}
+a1 <- quality[!is.na(quality$PM2.5), ] |> 
+  ggplot(aes(x = SO2, y = PM2.5)) +
+  geom_point(col = "#EB9891") + 
+  geom_smooth(method = "lm", se = FALSE, color = "black", aes(group = 1)) +
+  labs(title = "Distribución del contaminante PM2.5\n en función de la concentración de SO2", 
+                                                      x = "Concentración de SO2 (ug/m^3)", y = "Concentración de PM2.5 (ug/m^3)")  +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5))
+
+a2 <- quality[!is.na(quality$PM2.5), ] |> 
+  ggplot(aes(x = CO, y = PM2.5)) +
+  geom_point(col = "#EB9891") + 
+  geom_smooth(method = "lm", se = FALSE, color = "black", aes(group = 1)) +
+  labs(title = "Distribución del contaminante PM2.5\n en función de la concentración de CO", 
+                                                      x = "Concentración de CO (ug/m^3)", y = "Concentración de PM2.5 (ug/m^3)")  +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5))
+
+a3 <- quality[!is.na(quality$PM2.5), ] |> 
+  ggplot(aes(x = O3, y = PM2.5)) +
+  geom_point(col = "#EB9891") + 
+  geom_smooth(method = "lm", se = FALSE, color = "black", aes(group = 1)) +
+  labs(title = "Distribución del contaminante PM2.5\n en función de la concentración de 03", 
+                                                      x = "Concentración de O3 (ug/m^3)", y = "Concentración de PM2.5 (ug/m^3)")  +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5))
+
+Rmisc::multiplot(a1, a2, a3, cols = 2)
+```
+
+Algunos comentarios a la vista de los gráficos:
+
+-   Respecto de los gráficos que relacionan la variable `SO2` y la variable `CO` con los niveles del contaminante `PM2.5`, se observan **fuertes correlaciones positivas entre ambos pares de variables**.
+    Estas correlaciones son muy significativas, pues la aparición de parte del `PM2.5` en la atmósfera se produce como resultado de **reacciones químicas** a partir de **gases precursores** como el $SO_2$ y otros compuestos orgánicos volátiles.
+    Los **componentes inorgánicos secundarios**, como el sulfato y nitrato amónico, constituyen el 30-40 % de las partículas PM2.5, que se originan por la oxidación en la atmósfera del $SO_2$ y su interacción con el amoniaco ($NH_3$).
+
+-   Por otro lado, si analizamos el gráfico que relaciona la variable `O3` con los niveles del contaminante `PM2.5`, también se puede observar una **fuerte correlación entre ambas variables**, pero en esta ocasión de carácter negativo: **a más gas ozono en la troposfera**, **menores** son los niveles de `PM2.5` en la atmósfera.
+
+### Variables Temp, Rain y Wind_Speed
+
+```{r}
+sum1 <- quality |> 
+  drop_na() |> 
+  summarise(Variable = "Temp", min_lead = min(Temp), max_lead = max(Temp))
+
+sum2 <- quality |> 
+  drop_na() |>  
+  summarise(Variable = "Rain", min_lead = min(Rain), max_lead = max(Rain))
+
+sum3 <- quality |> 
+  drop_na() |> 
+  summarise(Variable = "Wind_Speed", min_lead = min(Wind_Speed), max_lead = max(Wind_Speed))
+
+rbind(sum1, sum2, sum3)
+```
+
+Las variables `Temp`, `Rain` y `Wind_Speed` miden distintas **condiciones meteorológicas y climatológicas**.
+Concretamente, la variable `Temp` mide la **temperatura ambiente** en grados Celsius (°C), la variable `Rain` la **precipitación** en milímetros de agua ($mm$), y la variable `Wind_Speed` la **velocidad del aire** en metros por segundo ($m/s$).
+Las variables `Rain` y `Wind_Speed` toman el valor 0 cuando, en un instante temporal determinado, no se registran precipitaciones, ni velocidad apreciable en el aire, respectivamente.
+
+Veamos cómo se comporta nuestra objetivo (`PM2.5`) en función de estos **fenómenos meteorológicos**.
+
+```{r layout="l-body-outset", fig.width=13, fig.asp = .9}
+a1 <- quality[!is.na(quality$PM2.5), ] |> 
+  ggplot(aes(x = Temp, y = PM2.5)) +
+  geom_point(col = "#EB9891") + 
+  geom_smooth(method = "lm", se = FALSE, color = "black", aes(group = 1)) +
+  labs(title = "Distribución del contaminante PM2.5\n en función de la temperatura", 
+                                                      x = "Temperatura (ºC)", y = "Concentración de PM2.5 (ug/m^3)")  +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5))
+
+a2 <- quality[!is.na(quality$PM2.5), ] |> 
+  ggplot(aes(x = Rain, y = PM2.5)) +
+  geom_point(col = "#EB9891") + 
+  geom_smooth(method = "lm", se = FALSE, color = "black", aes(group = 1)) + 
+  labs(title = "Distribución del contaminante PM2.5\n en función del nivel de precipitación", 
+                                                      x = "Precipitación (mm)", y = "Concentración de PM2.5 (ug/m^3)") +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5))
+
+a3 <- quality[!is.na(quality$PM2.5), ] |> 
+  ggplot(aes(x = Wind_Speed, y = PM2.5)) +
+  geom_point(col = "#EB9891") + 
+  geom_smooth(method = "lm", se = FALSE, color = "black", aes(group = 1)) +
+  labs(title = "Distribución del contaminante PM2.5\n en función de la velocidad del aire", 
+                                                      x = "Velocidad del aire (m/s)", y = "Concentración de PM2.5 (ug/m^3)") +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5))
+
+Rmisc::multiplot(a1, a2, a3, cols = 2)
+```
+
+Algunos comentarios a la vista de los gráficos:
+
+-   Las tres variables (`Temp`, `Rain` y `Wind_Speed`) mantienen **correlaciones negativas** con nuestra variable objetivo (`PM2.5`).
+    Para el caso de la variable `Temp`, la **correlación negativa se muestra bastante débil**.
+    Esto puede deberse a que las partículas de **menor tamaño** tienden a permanecer **más tiempo en el aire cuando la temperatura es más alta**, lo que aumenta su dispersión y dilución en el aire, resultando en una **disminución en la concentración** de partículas en suspensión.
+
+-   En cuanto a la variable `Rain`, se observa una **correlación negativa** un poco más fuerte con nuestra variable objetivo.
+    Ello puede deberse a que, a medida que aumenta la cantidad de lluvia, los niveles de partículas en suspensión **disminuyen** debido a que la lluvia **arrastra las partículas del aire y las deposita en el suelo**.
+    En este caso, **cerca del 96 % de los registros son 0**, esto es, días en los que no llueve en ninguna de las regiones contempladas en el dataset.
+    En la fases posteriores de modificación de variables, **transformaremos esta variable en binaria** (0: No llueve, 1: Llueve).
+
+-   Finalmente, en cuanto a la variable `Wind_Speed`, se observa que a medida que aumenta la velocidad del viento, los niveles de partículas en suspensión también **disminuyen**.
+    Esto puede deberse a que el viento ayuda a **dispersar las partículas en el aire** y a llevarlas **lejos de la fuente de emisión**, lo que vuelve a resultar en una disminución en la concentración de partículas en suspensión.
+
+## Variables cualitativas
+
+### Variable Wind_Dir
+
+```{r}
+quality |>
+  count(Wind_Dir, sort = TRUE) |>
+  mutate(porc = 100*n/sum(n))
+```
+
+La variable `Wind_Dir` presenta **dieciséis categorías** (exceptuando ausentes) bastante distribuidas.
+Cada categoría se corresponde con cada uno de los **dieciséis rumbos co-colaterales en los que se divide la circunferencia del horizonte**.
+Comprobemos ahora su afectación sobre nuestra variable objetivo.
+
+```{r layout="l-body-outset", fig.width=12, fig.height=7}
+aggregate(PM2.5 ~ Wind_Dir, quality[!is.na(quality$PM2.5), ], median) |>
+  mutate(n = pull(plyr::count(quality[!is.na(quality$Wind_Dir), ]$Wind_Dir))) |> 
+  ggplot(aes(x = Wind_Dir, y = PM2.5)) +
+  geom_bar(stat = "identity", fill= "#56BCC2") +
+  geom_label(aes(label = n, y = 0.7)) +
+  geom_hline(aes(yintercept = mean(PM2.5, na.rm = T), linetype = "Media"), colour = "black", size = .8) + 
+  geom_hline(aes(yintercept = median(PM2.5, na.rm = T), linetype = "Mediana"), colour = "black", size = .8) +
+  scale_linetype_manual(name = "Medidas", values = c(Media = "solid", Mediana = "dotted")) +
+  labs(title = "Distribución del contaminante PM2.5 en función de la dirección del aire", 
+                                                      x = "Dirección del aire", y = "Concentración de PM2.5 (ug/m^3)")  +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5))
+```
+
+Algunos comentarios a la vista del gráfico de barras:
+
+-   Las direcciones que involucran el **Este o el Sur** parecen ser las que **mayor relación mantienen con nuestra variable objetivo**. Cuando el aire se mueve en esas direcciones, los niveles de la materia particulada `PM2.5` **aumentan**, probablemente porque los gases contaminantes que propician la aparición de `PM2.5` **provengan de esas direcciones**. Por su parte, cuando el aire se mueve en dirección **Norte u Oeste**, se producen registros **más bajos** de materia `PM2.5` en suspensión.
+
+### Variable Station
+
+```{r}
+quality |>
+  count(Station, sort = TRUE) |>
+  mutate(porc = 100*n/sum(n))
+```
+
+La variable `Station` presenta **doce categorías** igualmente distribuidas.
+Cada categoría se corresponde con cada uno de los **distritos del área metropolitana de Beijing en donde se ubican las distintas estaciones meteorológicas desde las cuales se monitoriza la calidad del aire**.
+Comprobemos ahora su afectación sobre nuestra variable objetivo.
+
+```{r layout="l-body-outset", fig.width=12, fig.height=7}
+aggregate(PM2.5 ~ Station, quality[!is.na(quality$PM2.5), ], median) |>
+  mutate(n = pull(plyr::count(quality[!is.na(quality$Station), ]$Station))) |> 
+  ggplot(aes(x = Station, y = PM2.5)) +
+  geom_bar(stat = "identity", fill= "#56BCC2") +
+  geom_label(aes(label = n, y = 0.7)) +
+  geom_hline(aes(yintercept = mean(PM2.5, na.rm = T), linetype = "Media"), colour = "black", size = .8) + 
+  geom_hline(aes(yintercept = median(PM2.5, na.rm = T), linetype = "Mediana"), colour = "black", size = .8) +
+  scale_linetype_manual(name = "Medidas", values = c(Media = "solid", Mediana = "dotted")) +
+  labs(title = "Distribución del contaminante PM2.5 en función de la ubicación de la estación meteorológica", 
+                                                      x = "Ubicación de la estación meteorológica", y = "Concentración de PM2.5 (ug/m^3)")  +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5)) +
+  scale_x_discrete(guide = guide_axis(n.dodge = 2))
+```
+
+Algunos comentarios a la vista del gráfico de barras:
+
+-   La gran mayoría de distritos mantienen una **tendencia media** para con nuestra variable objetivo **muy similar**, cercana siempre a los **60** $\mu g/m^3$. Los distritos de `Changping`, `Dingling`, `Huairou` y `Shunyi` son los únicos que **se alejan de esa tendencia media**, probablemente por encontrarse más **alejados del centro**, en la parte más **noroeste de Beijing**.
+
+# Fase 2 y 3: Muestreo y modificación estructural de los datos
+
+Tras la fase de exploración de nuestro dataset (EDA), continuaremos con las fases de **muestreo** y **modificación** de los datos.
+En primer lugar, y dado que nuestro dataset contiene **más de 400 000 tuplas**, realizaremos un **muestreo** del **2-3 %** para que nos quede una muestra de, aproximadamente, **8 000 registros**. Si no redujésemos las dimensiones de nuestro dataset, los **filtros** y los **wrappers** para la selección de variables **tardarían horas en ejecutarse**. **Además, hemos fijado distintas semillas para comprobar que el muestreo no influya de alguna manera en los modelos y se han obtenido con todas ellas resultados muy similares**.
+
+En segundo lugar, para la fase de **modificación** de los datos, consideraremos **dos apartados** principales.
+Uno primero en donde se ejecutarán las **modificaciones estructurales** que afecten a toda las base de datos (transformar variables a factores, problemas de codificación o de rango, variables que no aportan, creación de variables en general, etc.), y uno segundo en donde se llevarán a cabo aquellas **modificaciones** que afecten **a cada algoritmo en concreto** a modo de **receta** (normalización para la métrica, recategorización, tratamiento de outliers/ausentes, dummyficación, etc.).
+
+## Muestreo
+
+Realizamos el muestreo. Lo retenemos en la nueva variable `quality_sample`.
+
+```{r}
+# Fijamos semilla
+set.seed(12346)
+
+# Muestreo
+quality_sample <-
+  quality_complete |>
+  slice_sample(prop = 0.02)
+```
+
+## Modificaciones estructurales
+
+Tras ello, procedemos a las **modificaciones estructurales**.
+Se tratan los problemas de **codificación** y de **tipología** de las variables comentados en epígrafes anteriores.
+
+```{r}
+# Aplicamos las modificaciones estructurales al dataset completo
+## Modificación del nombre de las variables
+quality_sample <- 
+  quality_sample |>
+  rename(ID = No, Year = year,
+         Month = month, Day = day,
+         Hour = hour, Temp = TEMP,
+         Pres = PRES, Dew_Point = DEWP,
+         Rain = RAIN, Wind_Dir = wd,
+         Wind_Speed = WSPM, Station = station)
+
+## Tratamiento de la variable tipo fecha `Day`
+quality_sample <-
+  quality_sample |> 
+  mutate(Day = as.Date(paste(Year, Month, Day, sep = "-"))) |> 
+  mutate(Day = factor(weekdays(Day, abbreviate = F)))
+
+## Modificaciones en la tipología de las variables
+quality_sample <-
+  quality_sample |> 
+  mutate_if(~!is.numeric(.), as.factor)
+
+## Eliminación de variables por problemas de colinealidad
+quality_sample <- 
+  quality_sample |> 
+  select(-c(PM10, NO2, Pres, Dew_Point))
+
+## Eliminación de variables por insustanciales
+quality_sample <- 
+  quality_sample |> 
+  select(-c(ID, Year, Month))
+```
+
+```{r echo=FALSE, results='hide'}
+# Partición conjunto test (10 %)
+quality_split <- initial_split(quality_sample, prop = 0.9)
+quality_split
+
+# Aplicamos la partición
+quality_train <- training(quality_split)
+quality_test <- testing(quality_split)
+```
+
+# Fase 4: Receta inicial para los métodos de regresión lineal y red neuronal
+
+Para que los distintos métodos de selección de modelos puedan **seleccionar las mejores variables**, vamos a generar una primera **receta inicial** con el **total** de variables **predictoras** que tenemos en el dataset.
+Se muestra a continuación el proceso **paso a paso**.
+
+## Aplicación de roles
+
+En este primer apartado **definimos nuestra receta** indicándole el conjunto de datos, y enfrentando nuestra variable objetivo `PM2.5` a todas las demás.
+Después, **asignamos posibles roles**, sujetos a modificación, que nos permitan diferenciar acciones entre las variables (sobre todo en la sección outliers).
+
+```{r}
+# Receta
+quality_rec_multi <-
+  # Fórmula y datos
+  recipe(data = quality_train, PM2.5 ~ .)|>
+  # Roles
+  add_role(where(is.factor), 
+           new_role = "cualitativa") |> 
+  add_role(where(is.numeric), 
+           new_role = "cuantitativa") |> 
+  add_role(SO2, CO, O3, Wind_Speed, PM2.5,
+           new_role = "mediana") |> 
+  add_role(Temp, 
+           new_role = "media") |> 
+  add_role(all_nominal_predictors(), Rain,
+           new_role = "moda")
+```
+
+## Reagrupación de las variables cualitativas
+
+En esta receta únicamente reagruparemos las categorías de **dos variables**: `Wind_Dir`, por presentar **categorías en exceso** y para evitar **complejidad y sobreajuste** en el modelo; y `Day`, para tratar de aprovechar las diferencias en las mediciones de calidad del aire respecto de los **días laborables** y respecto de los que **no lo son**.
+
+```{r}
+quality_rec_multi <- 
+  quality_rec_multi |> 
+  step_mutate(Wind_Dir = 
+                forcats::fct_collapse(Wind_Dir, 
+                             North = c("N", "NNE", "NNW", "NW", "WNW"), 
+                             East = c("E", "ENE", "ESE", "NE"), 
+                             South = c("S", "SE", "SSE", "SSW", "SW"),
+                             West = c("W", "WSW"))) |>
+  step_mutate(Day = 
+         forcats::fct_collapse(Day,
+                        Workday = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday"),
+                        Weekend = c("Saturday", "Sunday")))
+```
+
+## Recategorización de las variables cuantitativas
+
+En los métodos de regresión, la **recategorización** de las variables **cuantitativas no** es estrictamente **necesaria**.
+Por tanto, en este receta, del total de variables cuantitativas únicamente recategorizaremos la variable `Rain` (como ya se comentó en anteriores apartados) y la **variable tipo fecha** `Hour`, ambas como **variables binarias**.
+Posteriormente las transformamos todas ellas a **factor**.
+
+```{r}
+quality_rec_multi <- 
+  quality_rec_multi |> 
+  step_mutate(Rain =
+                cut(Rain,
+                  breaks = c(-Inf, 0, Inf),
+                  labels = c("No", "Yes")),
+              Hour =
+                cut(Hour,
+                  breaks = c(-Inf, 4, 18, Inf),
+                  labels = c("Working hour", "Non-working hour", "Working hour"))) |> 
+  step_mutate(Rain = factor(Rain),
+              Hour = factor(Hour))
+```
+
+## Tratamiento de outliers y valores ausentes
+
+```{r layout="l-body-outset", fig.width=13, fig.asp = .6}
+box1 <- 
+  ggplot(quality_train, aes(PM2.5, SO2)) +
+  geom_boxplot() +
+  theme_minimal() +
+  coord_flip()
+box2 <- 
+  ggplot(quality_train, aes(PM2.5, CO)) +
+  geom_boxplot() +
+  theme_minimal() +
+  coord_flip()
+box3 <- 
+  ggplot(quality_train, aes(PM2.5, O3)) +
+  geom_boxplot() +
+  theme_minimal() +
+  coord_flip()
+box4 <- 
+  ggplot(quality_train, aes(PM2.5, Temp)) +
+  geom_boxplot() +
+  theme_minimal() +
+  coord_flip()
+box5 <- 
+  ggplot(quality_train, aes(PM2.5, Wind_Speed)) +
+  geom_boxplot() +
+  theme_minimal() +
+  coord_flip()
+box6 <- 
+  ggplot(quality_train, aes(PM2.5)) +
+  geom_boxplot() +
+  theme_minimal()
+
+Rmisc::multiplot(box1, box2, box3, box4, box5, box6, cols = 2)
+```
+
+Si observamos estos gráficos de cajas y bigotes, prácticamente todas nuestras variables **cuantitativas continuas** son **asimétricas**, por lo que se detectarán los outliers y se imputarán los ausentes por la **mediana**.
+Para el caso de la variable `Temp`, nuestra única variable cuantitativa **simétrica**, se detectarán los outliers y se imputarán los ausentes por la **media**.
+Para el resto de variables **cualitativas** y **binarias**, **imputamos los ausentes** directamente por la **moda**.
+
+```{r}
+quality_rec_multi <-
+  quality_rec_multi |> 
+  # Detección de outliers por la mediana y por la media
+  step_mutate(across(has_role("mediana"), function(x) { ifelse(abs(scores(x, type = "mad")) > 3 & !is.na(x), NA, x) })) |>
+  step_mutate(across(has_role("media"), function(x) { ifelse(abs(scores(x, type = "z")) > 2.5 & !is.na(x), NA, x) })) |>  
+  # Imputación de ausentes por la mediana, la media y la moda
+  step_impute_median(has_role("mediana")) |>
+  step_impute_mean(has_role("media")) |>
+  step_impute_mode(has_role("moda"))
+```
+
+## Normalización por rango
+
+**Normalizamos** nuestras variables por rango para que todas tengan **el mismo peso**.
+
+```{r}
+quality_rec_multi <-
+  quality_rec_multi |> 
+  step_normalize(all_numeric_predictors()) 
+```
+
+## Creación de variables dummy
+
+**Dummyficaremos** también nuestras variables cualitativas. Para ello, tomamos **todas las nominales, menos nuestra variable objetivo**.
+
+```{r}
+quality_rec_multi <-
+  quality_rec_multi |>
+  step_dummy(all_nominal_predictors())
+```
+
+## Filtro de cero varianza
+
+Aplicamos el **filtro de cero varianza** a todas nuestras variables **predictoras**.
+
+```{r}
+quality_rec_multi <-
+  quality_rec_multi |>
+  step_zv(all_predictors())
+```
+
+## Horneado
+
+Por último, **horneamos** nuestra receta para comprobar que todas nuestras **nuevas variables** recategorizadas se hayan creado **correctamente**.
+Todas nuestras variables **numéricas** están **estandarizadas**, y todas nuestras **categóricas dummyficadas**.
+Tampoco existen ya valores ausentes ni outliers que alteren las distribuciones.
+
+```{r}
+bake(quality_rec_multi |>  prep(), new_data = NULL)
+```
+
+# Fase 5.1: Proceso de selección de variables
+
+En este apartado, pasaremos a **seleccionar las variables más interesantes de nuestra receta** según distintos **criterios de selección y de información**.
+En concreto emplearemos los siguientes métodos:
+
+1.  Filtro `SBF()` del paquete `{caret}`
+
+2.  Wrapper `RFE()` del paquete `{caret}`
+
+3.  Algoritmo `MMPC()` del paquete `{MXM}`
+
+4.  Algoritmo `SES()` del paquete `{MXM}`
+
+5.  Algoritmo `Boruta()` del paquete `{Boruta}`
+
+6.  Criterio de Información AIC con `stepAIC()` del paquete `{MASS}`
+
+7.  Criterio de Información BIC con `stepAIC()` del paquete `{MASS}`
+
+8.  Step repetido con el Criterio de Información AIC
+
+9.  Step repetido con el Criterio de Información BIC
+
+Para la selección de modelos, pasaremos directamente la receta a `lm()` para proceder a la regresión contra las variables escogidas.
+
+```{r}
+quality_prep <- 
+  bake(quality_rec_multi |> prep(), new_data = NULL)
+
+ajuste_quality <- 
+  lm(data = quality_prep, PM2.5 ~ .)
+```
+
+También vamos a activar **los procesos de paralización en nuestro ordenador** para que el procedimiento de selección vaya un poco **más rápido**.
+
+```{r}
+# Inicializamos la paralelización
+clusters <- detectCores() - 1
+make_cluster <- makeCluster(clusters)
+registerDoParallel(make_cluster)
+```
+
+## Filtro SBF()
+
+En primer lugar, probaremos con el **filtro SBF (Sequential Backward Feature Selection)** del paquete `{caret}`. El filtro SBF es una técnica de selección de variables que se utiliza en machine learning para reducir el número de variables de un conjunto de datos. Es una **técnica de selección hacia atrás** (backward), que comienza con un modelo que utiliza todas las variables disponibles y luego va eliminando iterativamente las variables menos importantes. Comprobemos ahora cuáles decide seleccionar de nuestra receta:
+
+```{r}
+# Fijamos semilla
+set.seed(12346)
+
+# Aplicación del filtro SBF
+SBF <- 
+  sbf(x = quality_rec_multi, data = quality_train,
+      sbfControl = sbfControl(functions = rfSBF,
+                              method = "cv"))
+
+# Extracción de las variables
+SBF_select <-
+  SBF$optVariables
+```
+
+Tras hacer varias pruebas con diferentes semillas, el filtro SBF siempre selecciona en torno a **15 variables de 23** y son las siguientes:
+
+```{r}
+dput(SBF$optVariables)
+```
+
+## Wrapper RFE()
+
+En segundo lugar, probaremos con el **wrapper RFE (Recursive Feature Elimination)** del paquete `{caret}`. Básicamente, la función RFE funciona eliminando recursivamente el conjunto de variables menos importantes del conjunto de datos y evaluando el rendimiento del modelo con el subconjunto de variables restantes. El proceso de eliminación se repite hasta que se alcanza el **número deseado de variables o un nivel de precisión determinado**. Comprobemos ahora cuáles decide seleccionar de nuestra receta:
+
+```{r}
+# Fijamos semilla
+set.seed(12346)
+
+# Aplicación del wrapper RFE
+RFE <-
+  rfe(x = quality_rec_multi, data = quality_train, sizes = 2^(2:4),
+      rfeControl = rfeControl(functions = rfFuncs,
+                              method = "cv", 
+                              number = 15))
+
+# Extracción de las variables
+RFE_select <-
+  RFE$optVariables
+```
+
+Tras hacer varias pruebas con diferentes semillas e hiperparámetros, el filtro RFE siempre selecciona en torno a **8 variables de 23** y son las siguientes:
+
+```{r}
+dput(RFE$optVariables[1:8])
+```
+
+## Algoritmo SES()
+
+En tercer lugar, probaremos con el **algoritmo SES** del paquete `{MXM}`. Comprobemos ahora cuáles decide seleccionar de nuestra receta:
+
+```{r}
+# Fijamos semilla
+set.seed(12346)
+
+# Aplicación del algoritmo SES
+data <-
+  as.matrix(quality_prep)
+
+SES <- 
+  SES(target = "PM2.5", dataset = data, 
+      max_k = 3, hash = TRUE, test = "testIndFisher")
+```
+
+Tras hacer varias pruebas con diferentes semillas e hiperparámetros, el algoritmo SES siempre selecciona en torno a **5 variables de 23** y son las siguientes:
+
+```{r}
+dput(names(quality_prep[,c(SES@selectedVars)]))
+```
+
+## Algortimo MMPC()
+
+En cuarto lugar, probaremos con el **algoritmo MMPC** del paquete `{MXM}`, un método similar al algoritmo SES cuya diferencia es que no generar múltiples subconjuntos de variables en el proceso. Comprobemos ahora cuáles decide seleccionar de nuestra receta:
+
+```{r}
+# Fijamos semilla
+set.seed(12346)
+
+# Aplicación del algoritmo MMPC
+data <-
+  as.matrix(quality_prep)
+
+MMPC <- 
+  MMPC(target = "PM2.5", dataset = data, 
+      max_k = 3, hash = TRUE, test = "testIndFisher")
+```
+
+Tras hacer varias pruebas con diferentes semillas e hiperparámetros, el algoritmo MMPC siempre selecciona en torno a **6 variables de 23** y son las siguientes:
+
+```{r}
+dput(names(quality_prep[,c(MMPC@selectedVars)]))
+```
+
+## Algoritmo Boruta()
+
+En quinto lugar, probaremos con el **algoritmo Boruta** del paquete `{Boruta}`. Boruta es un algoritmo wrapper de selección de variables capaz de trabajar con cualquier método de clasificación que genere una **medida de la relevancia de las variables**. Por defecto, Boruta usa Random Forest. Comprobemos ahora cuáles decide seleccionar de nuestra receta:
+
+```{r}
+# Fijamos semilla
+set.seed(12346)
+
+# Aplicación del algoritmo Boruta
+Boruta <- 
+  Boruta(PM2.5~., data = quality_prep)
+
+# Extracción de las variables
+Boruta_select <-
+  data.frame(Boruta$finalDecision)
+
+Boruta_select <-
+  Boruta_select[which(Boruta_select$Boruta.finalDecision=="Confirmed"),,drop=FALSE]
+```
+
+Tras hacer varias pruebas con diferentes semillas e hiperparámetros, el algoritmo Boruta siempre selecciona en torno a **12 de 23 variables** y son las siguientes:
+
+```{r}
+dput(row.names(Boruta_select))
+```
+
+## Criterio de información AIC
+
+En sexto lugar, probaremos con el **método de selección de modelos AIC (Criterio de Información de Akaike)** a través de la función `stepAIC` del paquete `{MASS}`. El AIC es un **método de selección de modelos** que evalúa la calidad de cada modelo y **penaliza** aquellos que son demasiado complejos. La función `stepAIC` utiliza el AIC para **comparar modelos con diferentes conjuntos de variables** explicativas y seleccionar el mejor de ellos. Comprobemos ahora cuáles decide seleccionar de nuestra receta:
+
+```{r results='hide'}
+# Fijamos semilla
+set.seed(12346)
+
+# Aplicación del stepAIC para el criterio AIC
+AIC <-
+  MASS::stepAIC(ajuste_quality, direction="both")
+```
+
+Resumimos la selección tras su procesado con `summary()`:
+
+```{r}
+# Extracción de las variables
+summary(AIC)
+```
+
+Tras hacer varias pruebas con diferentes semillas e hiperparámetros, la función `stepAIC()` siempre selecciona en torno a **11 de 23 variables** variables.
+
+## Criterio de información BIC
+
+En séptimo lugar, emplearemos el **método de selección de modelos BIC (Criterio de Información de Bayesiana)** a través de la función `stepAIC` del paquete `{MASS}`. Este método es muy similar al del Criterio de Información de Akaike, con la diferencia de que BIC introduce un componente penalizador a la complejidad del modelo más contundente. Para su cálculo, aplicaremos a la función `stepAIC` una **penalización** a través del hiperparámetro `k`. Esta penalización es igual al **logaritmo del número de filas de nuestro dataset**. Comprobemos ahora cuáles decide seleccionar de nuestra receta:
+
+```{r results='hide'}
+#Fijamos semilla
+set.seed(12346)
+
+# Aplicación del stepAIC con la penalización del criterio BIC
+BIC <-
+  MASS::stepAIC(ajuste_quality, direction="both", k = log(nrow(quality_train)))
+```
+
+Resumimos la selección tras su procesado con `summary()`:
+
+```{r}
+# Extracción de las variables
+summary(BIC)
+```
+
+Tras hacer varias pruebas con diferentes semillas e hiperparámetros, la función `stepAIC()` **en su versión BIC** siempre selecciona en torno a **10 de 23 variables** variables.
+
+## Step repetido con el Criterio de Información AIC
+
+Por último, probaremos las funciones `steprepetido()` propuestas por el profesor tanto para el **Criterio de Información AIC**, como el **BIC**. Comprobemos ahora cuáles decide seleccionar de nuestra receta:
+
+```{r}
+# Cargamos la fuente de la función
+source("/Users/leztin/Library/Mobile Documents/com~apple~CloudDocs/Universidad/Máster/Segundo cuatrimestre/Técnicas de Machine Learning/Tema 5/documentos R tema 5/funcion steprepetido.R")
+
+#Fijamos semilla
+set.seed(12346)
+
+# Aplicación del step repetido con AIC
+Repetido_AIC <-
+  steprepetido(data = quality_prep, vardep = c("PM2.5"),
+               listconti = c("SO2", "CO", "O3", "Temp", "Wind_Speed", "PM2.5", "Day_Weekend", 
+                             "Hour_Non.working.hour", "Rain_Yes", "Wind_Dir_North", "Wind_Dir_South", 
+                             "Wind_Dir_West", "Station_Changping", "Station_Dingling", "Station_Dongsi", 
+                             "Station_Guanyuan", "Station_Gucheng", "Station_Huairou", "Station_Nongzhanguan", 
+                             "Station_Shunyi", "Station_Tiantan", "Station_Wanliu", "Station_Wanshouxigong"),
+               sinicio = 12346, sfinal = 12385, porcen = 0.8, criterio = "AIC")
+
+# Extracción de las variables
+dput(Repetido_AIC[[2]][[1]])
+dput(Repetido_AIC[[2]][[2]])
+```
+
+Tras hacer varias pruebas con diferentes semillas e hiperparámetros, la función `steprepetido()` **en su versión AIC** siempre selecciona en torno a **12 de 23 variables** variables. Se han seleccionado dos sets: `CO`, `Temp`, `SO2`, `Wind_Dir_South`, `Hour_Non.working.hour`, `Rain_Yes`, `Wind_Speed`, `Day_Weekend`, `Station_Dongsi`, `Station_Dingling`, `O3` y `Station_Wanshouxigong`; y el segundo set: `CO`, `Temp`, `SO2`, `Hour_Non.working.hour`, `Wind_Dir_South`, `Rain_Yes`, `Station_Dongsi`, `Station_Dingling`, `Wind_Speed`, `Day_Weekend`, `O3` y `Wind_Dir_West`.
+
+## Step repetido con el Criterio de Información BIC
+
+Repetimos de nuevo pero ahora a partir del **Criterio de Información BIC**:
+
+```{r}
+#Fijamos semilla
+set.seed(12346)
+
+# Aplicación del step repetido con BIC
+Repetido_BIC <-
+  steprepetido(data = quality_prep, vardep = c("PM2.5"),
+               listconti = c("SO2", "CO", "O3", "Temp", "Wind_Speed", "PM2.5", "Day_Weekend", 
+                             "Hour_Non.working.hour", "Rain_Yes", "Wind_Dir_North", "Wind_Dir_South", 
+                             "Wind_Dir_West", "Station_Changping", "Station_Dingling", "Station_Dongsi", 
+                             "Station_Guanyuan", "Station_Gucheng", "Station_Huairou", "Station_Nongzhanguan", 
+                             "Station_Shunyi", "Station_Tiantan", "Station_Wanliu", "Station_Wanshouxigong"),
+               sinicio = 12346, sfinal = 12385, porcen = 0.8, criterio = "BIC")
+
+# Extracción de las variables
+dput(Repetido_BIC[[2]][[1]])
+dput(Repetido_BIC[[2]][[2]])
+```
+
+Tras hacer varias pruebas con diferentes semillas e hiperparámetros, la función `steprepetido()` **en su versión BIC** siempre selecciona en torno a **6 - 7 de 23 variables** variables. Se han seleccionado dos sets: `CO`, `Temp`, `SO2`, `Hour_Non.working.hour`, `Rain_Yes` y `Wind_Dir_South`; y el segundo set: `CO`, `Temp`, `SO2`, `Hour_Non.working.hour`, `Rain_Yes`, `Wind_Dir_South` y `Wind_Speed`.
+
+Una vez probados todos los métodos de selección, finalizamos los procesos de paralelización del ordenador.
+
+```{r}
+# Finalizamos la paralelización
+stopCluster(make_cluster)
+registerDoSEQ()
+```
+
+# Fase 5.2: Regresión lineal: comparación de los criterios de selección
+
+## Configuración inicial de los modelos de regresión para cada criterio de selección
+
+A continuación procedemos a comparar cada set de variables de cada uno de los criterios de selección a través de distintas **regresiones lineales con validación cruzada repetida** (función `cruzadalin()`). Se ha optado por aplicar **25 repeticiones por regresión** (con el hiperparámetro `repe =`), y, como hasta ahora, **se han probado distintas semillas a fin de cerciorarnos de la verdadera medida del error de los distintos modelos**.
+
+```{r}
+# Cargamos la fuente de la función
+source("/Users/leztin/Library/Mobile Documents/com~apple~CloudDocs/Universidad/Máster/Segundo cuatrimestre/Técnicas de Machine Learning/Tema 5/documentos R tema 5/cruzadas avnnet y lin.R")
+
+# Calculamos las regresiones con los distintos sets de variables de los distintos algoritmos
+graf_SBF <- 
+  cruzadalin(data = quality_prep, vardep = "PM2.5", 
+             listconti = c("SO2", "CO", "O3", "Temp", "Wind_Speed", "Day_Weekend", "Hour_Non.working.hour", 
+                           "Rain_Yes", "Wind_Dir_North", "Wind_Dir_South", "Wind_Dir_West", 
+                           "Station_Changping", "Station_Dingling", "Station_Dongsi", "Station_Gucheng", 
+                           "Station_Huairou"),
+             listclass = c(""), grupos = 4, sinicio = 12346, repe = 25)
+
+graf_SBF$Modelo = "Reg. lineal - Filtro SBF"
+graf_SBF$N_variables = "16"
+
+graf_RFE <- 
+  cruzadalin(data = quality_prep, vardep = "PM2.5", 
+             listconti = c("CO", "SO2", "O3", "Temp", "Wind_Speed", "Hour_Non.working.hour", 
+                           "Rain_Yes", "Station_Dingling"),
+             listclass = c(""), grupos = 4, sinicio = 12346, repe = 25)
+
+graf_RFE$Modelo = "Reg. lineal - Wrapper RFE"
+graf_RFE$N_variables = "8"
+
+graf_SES <- 
+  cruzadalin(data = quality_prep, vardep = "PM2.5", 
+             listconti = c("SO2", "CO", "Wind_Speed", "Hour_Non.working.hour", "Wind_Dir_North", 
+                           "Wind_Dir_West"),
+             listclass = c(""), grupos = 4, sinicio = 12346, repe = 25)
+
+graf_SES$Modelo = "Reg. lineal - Algoritmo SES"
+graf_SES$N_variables = "6"
+
+graf_MMPC <- 
+  cruzadalin(data = quality_prep, vardep = "PM2.5", 
+             listconti = c("SO2", "CO", "Temp", "Wind_Speed", "Wind_Dir_North", "Wind_Dir_West"),
+             listclass = c(""), grupos = 4, sinicio = 12346, repe = 25)
+
+graf_MMPC$Modelo = "Reg. lineal - Algoritmo MMPC"
+graf_MMPC$N_variables = "6"
+
+graf_Boruta <- 
+  cruzadalin(data = quality_prep, vardep = "PM2.5", 
+             listconti = c("SO2", "CO", "O3", "Temp", "Wind_Speed", "Hour_Non.working.hour", 
+                           "Rain_Yes", "Wind_Dir_North", "Wind_Dir_South", "Wind_Dir_West", 
+                           "Station_Dingling", "Station_Dongsi"),
+             listclass = c(""), grupos = 4, sinicio = 12346, repe = 25)
+
+graf_Boruta$Modelo = "Reg. lineal - Algoritmo Boruta"
+graf_Boruta$N_variables = "12"
+
+graf_AIC <- 
+  cruzadalin(data = quality_prep, vardep = "PM2.5", 
+             listconti = c("SO2", "CO", "O3", "Temp", "Wind_Speed", "Day_Weekend", "Hour_Non.working.hour", 
+                           "Rain_Yes", "Wind_Dir_North", "Wind_Dir_South", "Wind_Dir_West", 
+                           "Station_Dingling", "Station_Dongsi", "Station_Wanshouxigong"),
+             listclass = c(""), grupos = 4, sinicio = 12346, repe = 25)
+
+graf_AIC$Modelo = "Reg. lineal - Criterio AIC"
+graf_AIC$N_variables = "14"
+
+graf_BIC <- 
+  cruzadalin(data = quality_prep, vardep = "PM2.5", 
+             listconti = c("SO2", "CO", "Temp", "Wind_Speed", "Hour_Non.working.hour", "Rain_Yes", 
+                           "Wind_Dir_South", "Station_Dingling", "Station_Dongsi"),
+             listclass = c(""), grupos = 4, sinicio = 12346, repe = 25)
+
+graf_BIC$Modelo = "Reg. lineal - Criterio BIC"
+graf_BIC$N_variables = "9"
+
+graf_repetido_AIC_set1 <- 
+  cruzadalin(data = quality_prep, vardep = "PM2.5", 
+             listconti = c("CO", "Temp", "SO2", "Wind_Dir_South", "Hour_Non.working.hour", 
+                           "Rain_Yes", "Wind_Speed", "Day_Weekend", "Station_Dongsi", "Station_Dingling", 
+                           "O3", "Station_Wanshouxigong"),
+             listclass = c(""), grupos = 4, sinicio = 12346, repe = 25)
+
+graf_repetido_AIC_set1$Modelo = "Reg. lineal - Step Repetido AIC (set 1)"
+graf_repetido_AIC_set1$N_variables = "12"
+
+graf_repetido_BIC_set1 <- 
+  cruzadalin(data = quality_prep, vardep = "PM2.5", 
+             listconti = c("CO", "Temp", "SO2", "Hour_Non.working.hour", "Rain_Yes", "Wind_Dir_South"),
+             listclass = c(""), grupos = 4, sinicio = 12346, repe = 25)
+
+graf_repetido_BIC_set1$Modelo = "Reg. lineal - Step Repetido BIC (set 1)"
+graf_repetido_BIC_set1$N_variables = "6"
+
+graf_repetido_AIC_set2 <- 
+  cruzadalin(data = quality_prep, vardep = "PM2.5", 
+             listconti = c("CO", "Temp", "SO2", "Hour_Non.working.hour", "Wind_Dir_South", 
+                           "Rain_Yes", "Station_Dongsi", "Station_Dingling", "Wind_Speed", 
+                           "Day_Weekend", "O3", "Wind_Dir_West"),
+             listclass = c(""), grupos = 4, sinicio = 12346, repe = 25)
+
+graf_repetido_AIC_set2$Modelo = "Reg. lineal - Step Repetido AIC (set 2)"
+graf_repetido_AIC_set2$N_variables = "12"
+
+graf_repetido_BIC_set2 <- 
+  cruzadalin(data = quality_prep, vardep = "PM2.5", 
+             listconti = c("CO", "Temp", "SO2", "Hour_Non.working.hour", "Wind_Dir_South", 
+                           "Rain_Yes", "Wind_Speed"),
+             listclass = c(""), grupos = 4, sinicio = 12346, repe = 25)
+
+graf_repetido_BIC_set2$Modelo="Reg. lineal - Step Repetido BIC (set 2)"
+graf_repetido_BIC_set2$N_variables = "9"
+```
+
+Una vez ejecutados los **11 modelos**, procedemos a **unirlos** todos en un dataframe y a calcular la **raíz cuadrada del error** para su posterior representación.
+
+```{r}
+# Unimos todos los valores en un dataframe
+select_final <-
+  rbind(graf_SBF, graf_RFE, graf_SES, graf_MMPC, graf_Boruta, graf_AIC, 
+        graf_BIC, graf_repetido_AIC_set1, graf_repetido_BIC_set1, graf_repetido_BIC_set2,
+        graf_repetido_AIC_set2)
+
+# Calculamos la raíz cuadrada del error
+select_final$sqrt_error <-
+  sqrt(select_final$error)
+```
+
+## Representación del error de los modelos de regresión lineal
+
+A continuación generamos un `ggplot()` en modo boxplot que relacione cada **modelo** con su **error promedio**. Se ha incluido también una **etiqueta **que especifica el **número de variables que contiene cada modelo**. 
+
+```{r layout="l-body-outset", fig.width=13, fig.asp = .6}
+# Boxplot de la raíz cuadrada del error para cada modelo
+ggplot(data = select_final, aes(x = Modelo, y = sqrt_error)) +
+  geom_boxplot() +
+  labs(x = "Modelos", y = "Raíz cuadrada del error", title = "Distribución del error según los distintos modelos seleccionados") +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5)) +
+  geom_label(aes(label = N_variables, y = 48), size = 6) +
+  scale_x_discrete(guide = guide_axis(angle = 55))
+```
+
+Vamos a volver a representar el gráfico **eliminando los algoritmos MMPC y SES** para seleccionar el o los modelos que consideramos mejores.
+
+```{r layout="l-body-outset", fig.width=13, fig.asp = .6}
+# Boxplot de la raíz cuadrada del error para cada modelo (sin MMPC y SES)
+select_final |> 
+  filter(Modelo != "Reg. lineal - Algoritmo MMPC" & Modelo != "Reg. lineal - Algoritmo SES") |> 
+  ggplot(aes(x = Modelo, y = sqrt_error)) +
+  geom_boxplot() +
+  labs(x = "Modelos", y = "Raíz cuadrada del error", title = "Distribución del error según los distintos modelos seleccionados") +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5)) +
+  geom_label(aes(label = N_variables, y = 48), size = 6) +
+  scale_x_discrete(guide = guide_axis(angle = 55))
+```
+
+Teniendo en cuenta el *trade off* entre **el error del modelo y su complejidad**, representada por el número de variables, tenemos dos posibles candidatos:
+
+1.  **Modelo propuesto por el Criterio de Información BIC:** Presenta un error medio de 48.22 y cuenta con 9 variables.
+
+2.  **Modelo propuesto por el Step Repetido con el Criterio de Información BIC (set 1):** Presenta un error medio de 48.31 y cuenta con 6 variables.
+
+De entre estos dos modelos, quizá el del **Step Repetido BIC (set 1) sea el mejor**: presenta **3 variables menos** que el del Criterio BIC, mientras que el error **aumenta tan solo en 0.14** puntos. Aún así, para aportar variedad, probaremos en la siguiente fase a introducir ambos sets de variables en los **modelos de red neuronal**.
+
+Además, conviene destacar cómo **la mayoría de modelos que ofrece la regresión lineal presentan reducida varianza**.
+
+# Fase 5.3: Red neuronal: comparación de los criterios de selección
+
+## Red neuronal: tuneado simple
+
+En este primer apartado, aplicaremos a ambos sets de variables un **modelo de red neuronal básica (con parámetros por defecto)**. Tras ello, **compararemos los resultados** para ver si **mejoran** los de la regresión lineal.
+
+### Aplicación al primer set de variables (Criterio de Información BIC)
+
+```{r}
+#Fijamos semilla
+set.seed(12346)
+
+# Inicializamos la paralelización
+clusters <- detectCores() - 1
+make_cluster <- makeCluster(clusters)
+registerDoParallel(make_cluster)
+
+# Le indicamos validación cruzada repetida
+control <- 
+  trainControl(method = "repeatedcv", number = 4, repeats = 5, savePredictions = "all")
+
+# Creamos el grid sin tunear, con los parámetros por defecto
+avnnetgrid <-
+  expand.grid(size = c(5, 10, 15), decay = c(0.01, 0.1, 0.001), 
+              bag = FALSE)
+
+# Lanzamos el modelo de 9 variables (Criterio BIC)
+redavnnet <-
+  train(`PM2.5`~SO2 + CO + Temp + Wind_Speed + Hour_Non.working.hour + Rain_Yes + Wind_Dir_South + Station_Dingling + Station_Dongsi,
+        data = quality_prep, method = "avNNet", linout = TRUE, maxit = 100,
+        trControl = control, tuneGrid = avnnetgrid, repeats = 5, trace = FALSE)
+
+redavnnet
+pred_redavnnet <-
+  redavnnet$pred
+
+# Finalizamos la paralelización
+stopCluster(make_cluster)
+registerDoSEQ()
+```
+
+Como se puede observar, la opción con menor $RMSE$ y con mayor $R^2$ presenta un $size = 15$ y un $decay = 0.01$. En concreto, hemos obtenido un $R^2$ del **65.91 %** y un $RMSE$ del **45.62**. Recordemos que este modelo está **sin tunear**, con los **parámetros predeterminados** (`maxit = 100`). En posteriores epígrafes **tunearemos el grid** para tratar de **superar** estos resultados.
+
+### Aplicación al segundo set de variables (Step repetido con el Criterio de Información BIC)
+
+```{r}
+#Fijamos semilla
+set.seed(12346)
+
+# Inicializamos la paralelización
+clusters <- detectCores() - 1
+make_cluster <- makeCluster(clusters)
+registerDoParallel(make_cluster)
+
+# Le indicamos validación cruzada repetida
+control <- 
+  trainControl(method = "repeatedcv", number = 4, repeats = 5, savePredictions = "all")
+
+# Creamos el grid sin tunear, con los parámetros por defecto
+avnnetgrid <-
+  expand.grid(size = c(5, 10, 15), decay = c(0.01, 0.1, 0.001), 
+              bag = FALSE)
+
+# Lanzamos el modelo de 6 variables (step repetido con el Criterio BIC)
+redavnnet_2 <-
+  train(`PM2.5`~CO + Temp + SO2 + Hour_Non.working.hour + Rain_Yes + Wind_Dir_South,
+        data = quality_prep, method = "avNNet", linout = TRUE, maxit = 100,
+        trControl = control, tuneGrid = avnnetgrid, repeats = 5, trace = FALSE)
+
+redavnnet_2
+pred_redavnnet_2 <-
+  redavnnet_2$pred
+
+# Finalizamos la paralelización
+stopCluster(make_cluster)
+registerDoSEQ()
+```
+
+En este caso, la opción con menor $RMSE$ y con mayor $R^2$ presenta un $size = 15$ y un $decay = 0.001$. En concreto, hemos obtenido un $R^2$ del **65.81 %** y un $RMSE$ del **45.7**. Recordemos que este modelo está **sin tunear**, con los **parámetros predeterminados** (`maxit = 100`). En posteriores epígrafes **tunearemos el grid** para tratar de **superar** estos resultados.
+
+### Comparativa parcial
+
+```{r}
+#Fijamos semilla
+set.seed(12346)
+
+# Inicializamos la paralelización
+clusters <- detectCores() - 1
+make_cluster <- makeCluster(clusters)
+registerDoParallel(make_cluster)
+
+Red_BIC <-
+  cruzadaavnnet(data = quality_prep, vardep = "PM2.5",
+                listconti = c("SO2", "CO", "Temp", "Wind_Speed", "Hour_Non.working.hour", "Rain_Yes", 
+                              "Wind_Dir_South", "Station_Dingling", "Station_Dongsi"),
+                listclass = c(""), grupos = 4, sinicio = 12346, repe = 25, repeticiones = 5,
+                itera = 100, size = c(15), decay = c(0.01))
+
+Red_BIC$Modelo = "Red neuronal - Criterio BIC"
+Red_BIC$N_variables = "9"
+
+
+Red_step_BIC <-
+  cruzadaavnnet(data = quality_prep, vardep = "PM2.5",
+                listconti = c("CO", "Temp", "SO2", "Hour_Non.working.hour", "Rain_Yes", "Wind_Dir_South"),
+                listclass = c(""), grupos = 4, sinicio = 12346, repe = 25, repeticiones = 5,
+                itera = 100, size = c(15), decay = c(0.001))
+
+Red_step_BIC$Modelo = "Red neuronal - step repetido Criterio BIC (set 1)"
+Red_step_BIC$N_variables = "6"
+
+# Finalizamos la paralelización
+stopCluster(make_cluster)
+registerDoSEQ()
+```
+
+```{r}
+# Unimos todos los valores en un dataframe
+select_final <-
+  rbind(graf_SBF, graf_RFE, graf_SES, graf_MMPC, graf_Boruta, graf_AIC, 
+        graf_BIC, graf_repetido_AIC_set1, graf_repetido_BIC_set1, graf_repetido_AIC_set2, 
+        graf_repetido_BIC_set2, Red_BIC, Red_step_BIC)
+
+# Calculamos la raíz cuadrada del error
+select_final$sqrt_error <-
+  sqrt(select_final$error)
+```
+
+```{r layout="l-body-outset", fig.width=13, fig.asp = .6}
+# Boxplot de la raíz cuadrada del error para cada modelo
+select_final |> 
+  filter(Modelo != "Reg. lineal - Algoritmo MMPC" & Modelo != "Reg. lineal - Algoritmo SES") |> 
+  ggplot(aes(x = Modelo, y = sqrt_error)) +
+  geom_boxplot() +
+  labs(x = "Modelos", y = "Raíz cuadrada del error", title = "Distribución del error según los distintos modelos seleccionados") +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5)) +
+  geom_label(aes(label = N_variables, y = 45), size = 6) +
+  scale_x_discrete(guide = guide_axis(angle = 55))
+```
+
+Como se puede observar **las diferencias en el error con la red neuronal son bastante significativas**, y ello sin siquiera tunear en exceso los hiperparámetros. **Hemos conseguido reducir el error en 2 puntos**. Por otro lado, también es cierto que **hemos logrado reducir el sesgo a costa de incrementar en cierta medida la varianza** (aunque no en exceso). Habrá que ver que consideramos mejor en posteriores epígrafes.
+
+## Red neuronal: tuneado complejo
+
+En este segundo apartado, aplicaremos a ambos sets de variables un **modelo de red neuronal con parámetros tuneados según los nodos máximos de los modelos**. Tras ello, **compararemos los resultados** para ver si **mejoran** los de la regresión lineal.
+
+### Aplicación al primer set de variables (Criterio de Información BIC)
+
+En este set tenemos **nueve variables**. Si dividimos el total de las **observaciones** (7573) entre **30** (el número máximo promedio de observaciones por parámetro), resultarían **252 parámetros como máximo**. Si aplicamos la fórmula $h = 252/(k + 2)$, siendo $k = 9$, Esto equivaldría a **23 nodos** para el tuneo como máximo. Como en el anterior tuneo simple parecía que el $R^2$ podía seguir aumentando al incrementar el número de nodos, modificaremos la opción `size` hasta el número máximo de nodos (23). Por otro lado, vamos también a incrementar las opciones del hiperparámetro `decay` con 0.01, 0.1, 0.001, 0.0001. Por último, y tras varias pruebas, tunearemos las **iteraciones** con el parámetro `maxit` **desde las 10 hasta las 6000**.
+
+```{r eval=FALSE}
+#Fijamos semilla
+set.seed(12346)
+
+# Inicializamos la paralelización
+clusters <- detectCores() - 1
+make_cluster <- makeCluster(clusters)
+registerDoParallel(make_cluster)
+
+# Le indicamos validación cruzada repetida
+control <- 
+  trainControl(method = "repeatedcv", number = 4, repeats = 5, savePredictions = "all")
+
+# Creamos el grid tuneado
+avnnetgrid <-
+  expand.grid(size = c(15, 20, 23, 30), decay = c(0.01, 0.1, 0.001, 0.0001), 
+              bag = FALSE)
+
+# Lanzamos la función del modelo con 9 variables con iteraciones
+completo_1 <- data.frame()
+iteraciones <- c(10, 20, 50, 100, 200, 300, 500, 1000, 2000, 3000, 4000, 5000, 6000)
+
+for (i in iteraciones)
+{
+  redavnnet_1 <- train(`PM2.5`~SO2 + CO + Temp + Wind_Speed + Hour_Non.working.hour + Rain_Yes + Wind_Dir_South + Station_Dingling + Station_Dongsi,
+                    data=quality_prep, method="avNNet",linout = TRUE, maxit = i,
+                    trControl = control, repeats = 5, tuneGrid = avnnetgrid, trace = F)
+  # Añado la columna del parámetro de iteraciones
+  redavnnet_1$results$itera <- i
+  # Voy incorporando los resultados a completo
+  completo_1 <- rbind(completo_1, redavnnet_1$results)
+}
+
+redavnnet_1
+pred_redavnnet_1 <-
+  redavnnet_1$pred
+
+# Finalizamos la paralelización
+stopCluster(make_cluster)
+registerDoSEQ()
+```
+
+Independientemente de lo que nos ofrezca `{caret}`, **vamos a graficar los valores** para todos los **nodos**, todas las **iteraciones** y todos los **decay** para elegir manualmente el modelo que consideremos **más estable**.
+
+```{r eval = FALSE}
+ggplot(completo_1, aes(x = factor(itera), y = RMSE, 
+                     color = factor(decay), pch = factor(size))) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  theme_minimal()
+```
+
+```{r layout="l-body-outset", fig.width=50, fig.asp = .99, echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Completo 1.png")  
+```
+
+Para no sobreajustar creando un modelo demasiado complejo, creo que me decantaré por los **20 nodos**. Filtremos el gráfico por esta cantidad para determinar finalmente el **número de iteraciones** y el **decay**.
+
+```{r eval=FALSE}
+completo_1 |> 
+  filter(size == 20) |> 
+  ggplot(aes(x = factor(itera), y = RMSE,
+             color = factor(decay), pch = factor(size))) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  theme_minimal()
+```
+
+```{r layout="l-body-outset", fig.width=50, fig.asp = .99, echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Captura de pantalla 2023-04-06 a las 14.14.08.png")  
+```
+
+No parece necesario incrementar a tal nivel las iteraciones, **a partir de las 300 todo se vuelve estable**. Vamos a quedarnos finalmente con **20 nodos**, **300 iteraciones** y **0.01 de decay**. En este sentido, el modelo parece estabilizarse en torno a un $RMSE$ de **45.5** y a un $R^2$ del **66 %**. Conviene recordar cómo **se han probado distintas combinaciones de hiperparámetros con diferentes semillas** y siempre alcanzamos la misma horquilla ($RMSE = 44-45$ y $R^2 = 66-67$). A continuación probaremos a tunear nuestro segundo set de variables.
+
+### Aplicación al segundo set de variables (Step repetido con el Criterio de Información BIC)
+
+En este segundo set tenemos **seis variables**. Si dividimos el total de las **observaciones** (7573) entre **30** (el número máximo promedio de observaciones por parámetro), resultarían **252 parámetros como máximo**. Si aplicamos la fórmula $h = 252/(k + 2)$, siendo $k = 6$, Esto equivaldría a **32 nodos** para el tuneo como máximo. De nuevo, como en el anterior tuneo simple parecía que el $R^2$ podía seguir aumentando al incrementar el número de nodos, modificaremos la opción `size` hasta el número máximo de nodos (32). Por otro lado, vamos también a incrementar las opciones del hiperparámetro `decay` con 0.01, 0.1, 0.001, 0.0001. Por último, y tras varias pruebas, tunearemos las **iteraciones** con el parámetro `maxit` **desde las 10 hasta las 6000**.
+
+```{r eval=FALSE}
+#Fijamos semilla
+set.seed(12346)
+
+# Inicializamos la paralelización
+clusters <- detectCores() - 1
+make_cluster <- makeCluster(clusters)
+registerDoParallel(make_cluster)
+
+# Le indicamos validación cruzada repetida
+control <- 
+  trainControl(method = "repeatedcv", number = 4, repeats = 5, savePredictions = "all")
+
+# Creamos el grid tuneado
+avnnetgrid <-
+  expand.grid(size = c(20, 25, 32, 40), decay = c(0.01, 0.1, 0.001, 0.0001), 
+              bag = FALSE)
+
+# Lanzamos la función del modelo de 6 variables con iteraciones
+completo_2 <- data.frame()
+iteraciones <- c(10, 20, 50, 100, 200, 300, 500, 1000, 2000, 3000, 4000, 5000, 6000)
+
+for (i in iteraciones)
+{
+  redavnnet_2 <- train(`PM2.5`~CO + Temp + SO2 + Hour_Non.working.hour + Rain_Yes + Wind_Dir_South,
+                    data=quality_prep, method="avNNet",linout = TRUE, maxit = i,
+                    trControl = control, repeats = 5, tuneGrid = avnnetgrid, trace = F)
+  # Añado la columna del parámetro de iteraciones
+  redavnnet_2$results$itera <- i
+  # Voy incorporando los resultados a completo
+  completo_2 <- rbind(completo_2, redavnnet_2$results)
+}
+
+redavnnet_2
+pred_redavnnet_2 <-
+  redavnnet_2$pred
+
+# Finalizamos la paralelización
+stopCluster(make_cluster)
+registerDoSEQ()
+
+redavnnet_2$results
+```
+
+De nuevo, independientemente de lo que nos ofrezca `{caret}`, **vamos a graficar los valores** para todos los **nodos**, todas las **iteraciones** y todos los **decay** para elegir manualmente el modelo que consideremos **más estable**.
+
+```{r eval=FALSE}
+ggplot(completo_2, aes(x = factor(itera), y = RMSE, 
+                     color = factor(decay), pch = factor(size))) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  theme_minimal()
+```
+
+```{r layout="l-body-outset", fig.width=50, fig.asp = .99, echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Completo 2.png")  
+```
+
+Al igual que en el anterior apartado, para no sobreajustar creando un modelo demasiado complejo, me decantaré esta vez por los **25 nodos**. Filtremos el gráfico por esta cantidad para determinar finalmente el **número de iteraciones** y el **decay**.
+
+```{r eval=FALSE}
+completo_2 |> 
+  filter(size == 25) |> 
+  ggplot(aes(x = factor(itera), y = RMSE,
+             color = factor(decay), pch = factor(size))) +
+  geom_point(position = position_dodge(width = 0.5), size = 3) +
+  theme_minimal()
+```
+
+```{r layout="l-body-outset", fig.width=50, fig.asp = .99, echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Completo 2 (detalle).png")  
+```
+
+Para este caso, vamos a quedarnos finalmente con **25 nodos**, **1000 iteraciones** y **0.1 de decay**. El modelo parece estabilizarse en torno a un $RMSE$ de **45** y a un $R^2$ del **67 %**. A nivel de resultados, este segundo set de variables es **mejor**: ofrece una **mayor precisión** y un **menor error**, además de incluir a un **menor número de variables** (de 9 variables que teníamos en el primer set a únicamente 6). Aún con todo, el modelo **sigue sin superar el 67 %** de $R^2$ y las diferencias tanto en error como en variabilidad explicada **no son excesivamente significativas**. A continuación, y a modo de conclusión, realizaremos una **comparativa final** entre todos los modelos y compararemos con un gráfico de distribución las **predicciones del mejor de todos** con las **observaciones reales** de la variable objetivo.
+
+Antes de ello, fijamos los mejores parámetros que hemos seleccionado para ambos modelos con la función `{cruzadaavnnet}`:
+
+```{r cache = TRUE}
+#Fijamos semilla
+set.seed(12346)
+
+# Inicializamos la paralelización
+clusters <- detectCores() - 1
+make_cluster <- makeCluster(clusters)
+registerDoParallel(make_cluster)
+
+Red_BIC_tun <-
+  cruzadaavnnet(data = quality_prep, vardep = "PM2.5",
+                listconti = c("SO2", "CO", "Temp", "Wind_Speed", "Hour_Non.working.hour", "Rain_Yes", 
+                              "Wind_Dir_South", "Station_Dingling", "Station_Dongsi"),
+                listclass = c(""), grupos = 4, sinicio = 12346, repe = 25, repeticiones = 5,
+                itera = 300, size = c(20), decay = c(0.01))
+
+Red_BIC_tun$Modelo = "Red neuronal tuneada - Criterio BIC"
+Red_BIC_tun$N_variables = "9"
+
+
+Red_step_BIC_tun <-
+  cruzadaavnnet(data = quality_prep, vardep = "PM2.5",
+                listconti = c("CO", "Temp", "SO2", "Hour_Non.working.hour", "Rain_Yes", "Wind_Dir_South"),
+                listclass = c(""), grupos = 4, sinicio = 12346, repe = 25, repeticiones = 5,
+                itera = 1000, size = c(25), decay = c(0.1))
+
+Red_step_BIC_tun$Modelo = "Red neuronal tuneada - step repetido Criterio BIC (set 1)"
+Red_step_BIC_tun$N_variables = "6"
+
+# Finalizamos la paralelización
+stopCluster(make_cluster)
+registerDoSEQ()
+```
+
+# Fase 6: Conclusiones finales
+
+Para comenzar con la comparativa, primero **uniremos todos los modelos de este trabajo**, tanto de regresión lineal como de redes neuronales, en un único **dataframe** y graficaremos su error.
+
+```{r}
+# Unimos todos los modelos del trabajo en un dataframe
+select_final <-
+  rbind(graf_SBF, graf_RFE, graf_SES, graf_MMPC, graf_Boruta, graf_AIC, 
+        graf_BIC, graf_repetido_AIC_set1, graf_repetido_BIC_set1, graf_repetido_AIC_set2, 
+        graf_repetido_BIC_set2, Red_BIC, Red_step_BIC, Red_BIC_tun, Red_step_BIC_tun)
+
+# Calculamos la raíz cuadrada del error
+select_final$sqrt_error <-
+  sqrt(select_final$error)
+```
+
+```{r layout="l-body-outset", fig.width=13, fig.asp = .6}
+# Boxplot de la raíz cuadrada del error para cada modelo
+select_final |> 
+  filter(Modelo != "Reg. lineal - Algoritmo MMPC" & Modelo != "Reg. lineal - Algoritmo SES") |> 
+  ggplot(aes(x = Modelo, y = sqrt_error)) +
+  geom_boxplot() +
+  labs(x = "Modelos", y = "Raíz cuadrada del error", title = "Distribución del error según los distintos modelos seleccionados") +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5)) +
+  geom_label(aes(label = N_variables, y = 45), size = 6) +
+  scale_x_discrete(guide = guide_axis(angle = 55))
+```
+
+A simple vista ya se puede observar cómo **los modelos de red neuronal mejoran sobradamente el error de los modelos de regresión lineal** aunque, de nuevo, **a costa de incrementar su varianza**. Aún con todo parece merecer la pena. Para cerciorarnos, vamos a filtrar únicamente los resultados de las redes neuronales a fin de poder comparar mejor sus resultados.
+
+```{r layout="l-body-outset", fig.width=13, fig.asp = .6}
+# Boxplot de la raíz cuadrada del error para cada modelo
+select_final |> 
+  filter(Modelo == c("Red neuronal - Criterio BIC", "Red neuronal tuneada - Criterio BIC", 
+                     "Red neuronal - step repetido Criterio BIC (set 1)", "Red neuronal tuneada - step repetido Criterio BIC (set 1)")) |> 
+  ggplot(aes(x = Modelo, y = sqrt_error)) +
+  geom_boxplot() +
+  labs(x = "Modelos", y = "Raíz cuadrada del error", title = "Distribución del error según los distintos modelos seleccionados") +
+  theme_minimal() +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5)) +
+  geom_label(aes(label = N_variables, y = 45), size = 6) +
+  scale_x_discrete(guide = guide_axis(angle = 55))
+```
+
+Los resultados son **más o menos similares**, aunque, como era de esperar, **las redes tuneadas mejoran a las redes con los hiperparámetros por defecto**. Finalmente nos quedaremos con el **modelo step repetido del Criterio BIC (size = 25, decay = 0.1, iter = 1000)** principalmente por su **menor número de variables** (3 menos que la otra alternativa) y por su **reducida varianza**. De esta manera, habríamos alcanzado un $R^2$ del **66.32 %** y un error cuadrático medio ($RMSE$) del **45.37** con **únicamente 6 variables de las 22 que teníamos en total**. Como ya se ha comentado en repetidas ocasiones, a lo largo del documento se han hecho **muchas pruebas con diferentes semillas y con distintos valores para los hiperparámetros e iteraciones** que, por motivos de capacidad de procesamiento, no se han podido incluir en la memoria final. Aún con todo se han seleccionado los valores que, en media, ofrecían los **mejores resultados** para este dataset.
+
+Por otro lado, para hacernos una idea de la **calidad del modelo**, se han comprobado los **resultados de otras predicciones** sobre el mismo dataset en **Kaggle**: **ninguno de los notebooks publicados superan los resultados de los modelos presentados en este trabajo**, que, como mucho, los igualan. A continuación se muestra los resultados del notebook mejor valorado en Kaggle (OLS Model-Beijing Multisite-AQI - AbdulKarim). Como se puede observar, los resultados de sus mejores algoritmos son muy similares a los de este trabajo ([https://bit.ly/3GftzIV]):
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Captura de pantalla 2023-04-04 a las 14.47.59.png")  
+```
+
+En definitiva, con las variables disponibles en el dataset para predecir los valores de la objetivo `PM2.5`, parece que **el máximo en el ratio de información explicada de los modelos se sitúa en el 66-67 %**. Por último, contrastaremos con un **gráfico de distribución** las **predicciones** que arrojó el modelo seleccionado con las **observaciones reales** de `PM2.5`.
+
+```{r eval=FALSE}
+pred_redavnnet_2 |> 
+  dplyr::select(pred, obs) |> 
+  gather(Distribución, value) |> 
+  ggplot(aes(x = value, color = Distribución, fill = Distribución)) + 
+  geom_density(alpha = 0.6) + 
+  theme_minimal() + 
+  labs(title = "Distribución de las predicciones sobre los valores reales de PM2.5 (6 variables)",
+       x = "Distribuciones",
+       y = "Frecuencia") +
+  theme(text = element_text(face = "bold", size = 15), plot.title = element_text(hjust = 0.5), 
+        axis.title.x = element_text(vjust=-0.5))
+```
+
+```{r layout="l-body-outset", fig.width=50, fig.asp = .99, echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Comparación final probabilística.png")  
+```
+
+Como se puede apreciar en el gráfico, la masa probabilística de las **predicciones** (azul) **se ajusta bastante bien** a la de los **valores reales** (rojo). Como ya se ha comentado, este es el **mejor resultado** al que se ha podido llegar tras muchas pruebas con las **variables disponibles** y con los **algoritmos seleccionados**. En el segundo PDF adjunto se resuelve esta misma práctica empleando el **software SAS Miner**.
+
+<CENTER>**¡Muchas gracias por la atención!**</CENTER>
