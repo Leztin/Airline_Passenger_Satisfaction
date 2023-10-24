@@ -1,0 +1,174 @@
+---
+title: "Práctica II - Software SAS Miner"
+description: |
+  Aplicando distintos algoritmos con selección de modelos a Airline Passenger Satisfaction
+author:
+  - name: Iván González Martín
+    affiliation: Universidad Complutense de Madrid
+    affiliation_url: https://ucm.es
+date: "`r Sys.Date()`"
+output:
+    distill::distill_article:
+        highlight: kate
+        colorlinks: true
+        code_folding: false
+        toc: true            
+        toc_depth: 3
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+# Ajuste comunes de los chunks
+knitr::opts_chunk$set(message = FALSE, warning = FALSE,
+                      cache = TRUE, res = 400)
+```
+
+# Contenido del dataset
+
+El dataset que se presenta para su análisis en esta práctica reúne información acerca de distintas **características evaluables** de **más de 120 000 vuelos nacionales** de **8 aerolíneas estadounidenses**.
+Los datos provienen de la **US Airline Passenger Satisfaction Survey (2018)**, una encuesta realizada anualmente por el **Departamento de Transporte de los Estados Unidos** para medir la satisfacción de los pasajeros de las aerolíneas que operan en los Estados Unidos.
+La encuesta **recopila información** sobre la calidad de los servicios ofrecidos por las aerolíneas, la puntualidad de los vuelos, la limpieza de las aeronaves, el servicio al cliente, la comodidad de los asientos, y la calidad de la comida y la bebida, entre otros.
+Los resultados de la encuesta se emplean para **informar** a **los consumidores, a las aerolíneas y al propio gobierno** sobre el rendimiento de las compañías aéreas, así como para identificar áreas en las que quizá deban **mejorar su servicio al cliente**.
+
+Los **dos archivos CSV** que componen el dataset se han descargado del **UCI Machine Learning Repository** y no han sido modificados: [<https://bit.ly/3mXgcXx>].
+
+# Objetivo
+
+El objetivo de esta práctica es **predecir** la variable **binaria** `satisfaction` a través de distintos algoritmos con **selección de modelos** (BIC, AUC, etc.).
+Concretamente, se emplearán **redes neuronales, regresión logística, técnicas de bagging, Random Forest, Gradient Boosting, XGBoost, modelos SVM y modelos ensamblados**.
+**Para este segundo PDF, la práctica se resolverá con el software SAS Miner**.
+
+# Paquetes necesarios
+
+Para llevar a cabo nuestro objetivo, necesitaremos los siguientes paquetes:
+
+```{r paquetes}
+# Paquetes
+library(tidymodels)
+library(tidyverse)
+library(parallel)
+library(doParallel)
+```
+
+# Fase 1: Dataset inicial, selección de variables y división de particiones
+
+Esta sección del trabajo se ha realizado **tras haber creado la receta** con todas las **modificaciones** sobre el dataset original en **R**, por lo que en SAS Miner, en lugar de emplear los datos originales, **se ha aprovechado ese dataset modificado para realizar la comparativa entre regresión y red neuronal**. Los **detalles más específicos** sobre los cambios que se han ido llevando a cabo en la receta (dummyficación, estandarización, etc.) se pueden consultar en el **primer PDF de la práctica** en donde se resuelve íntegramente con **lenguaje R**. En concreto, el dataset que se ha importado a SAS Miner tiene la siguiente forma:
+
+```{r}
+# Cargamos el dataset
+air_complete <- read_csv(file = "/Users/leztin/Desktop/DATOS/air.csv")
+glimpse(air_complete)
+```
+
+Como se puede observar, las variables **cualitativas** ya están **dummyficadas** y las **cuantitativas normalizadas**.
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Selección de variables.png")
+```
+
+Una vez cargado el dataset como **«fuente de datos»**, se introdujeron distintos nodos de **selección de variables** para que SAS eligiera **automáticamente** las más relevantes (en las que coincidieran los cuatro nodos). Se modificó el atributo de $R^2$ mínimo para que el **límite inferior** en la selección de variables fuera de $0.002$.
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/SELECCION DE VARIABLES (2).png")
+```
+
+Como se puede observar, finalmente seleccionamos las variables en las que **coincidían los cuatro métodos de selección implicados** (nodo «selección de variables», nodo «mínimos cuadrados parciales», nodo «incremento gradiente» y nodo «regresión»).Esta selección incluye **13 variables de las 32 que había en un inicio**. Estas variables son muy similares a las seleccionadas por el **step repetido con el Criterio de Información BIC incluido en el PDF en el que se resuelve la práctica con R**.
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/TRAIN-TEST.png")
+```
+
+Una vez seleccionadas las variables en la fuente de datos, realizamos las **particiones training-test** a través del nodo **«partición de datos»**. Concretamente dedicamos un **70 % a train**, un **0 % a validación** y un **30 % a test**. Además, generamos un total de **10 nodos de «partición de datos» adicionales con distintas semillas** (desde 12347 hasta 12357) a modo de **esquemas de muestreo** a la hora de comparar resultados.
+
+# Fase 2: Ejecución y tuneo de los algoritmos
+
+Una vez definidas las distintas particiones con las diferentes semillas, introducimos los nodos de **Regresión**, **Red Neuronal**, **HP Forest**, **Incremento de Gradiente**, **HP SVM Lineal**, **HP SVM Polinomial** y **HP SVM Radial**.
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Modelos 2.png")
+```
+
+Con nuestro **set de 13 variables** preseleccionadas, **se han ido modificando los hiperparámetros de todos los algoritmos** según **el criterio descrito para cada uno en el primer PDF: «Práctica II - R - Iván González Martín»**. Para no repetirme demasiado en las explicaciones, **me remito a ese documento para el análisis detallado** del porqué de la selección de hiperparámetros para cada algoritmo.
+
+Por otra parte, las **iteraciones** se han modificado a **1000** en todos los nodos **como máximo**, y los **algoritmos** y **funciones de activación** se han mantenido en **predeterminado**. Tras varias pruebas con diferentes algoritmos (Levenberg-Marquardt, Quasi-Newton, BackProp, RPROP, etc.), la opción predeterminada era la que **ofrecía mejores resultados**.
+
+### Creación del modelo de ensamblado
+
+Además de los modelos clásicos, también se ha generado un modelo de ensamblado a partir de los promedios de los modelos de **Regresión**, **Red Neuronal**, **Incremento de Gradiente**, **HP SVM Lineal** y **HP SVM Polinomial**. Se generó con el nodo **«Conjunto»** del apartado «Modelización».
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Ensamblado.png")
+```
+
+# Fase 3: Comparación de los resultados
+
+Tras ejecutar todos los nodos que hemos definido, en esta sección **analizaremos los resultados que nos arrojan**. Mostraremos el $TASE$ de los resultados de algunas semillas de aleatorización a modo de ejemplo.
+
+**Semilla 12346**
+
+```{r out.width = "50%", echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/semillita 1.png")
+```
+
+**Semilla 12347:**
+
+```{r out.width = "50%", echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Captura de pantalla 2023-05-17 a las 2.37.52.png")
+```
+
+**Semilla 12348:**
+
+```{r out.width = "50%", echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Captura de pantalla 2023-05-17 a las 12.29.03.png")
+```
+
+**Semilla 12349:**
+
+```{r out.width = "50%", echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Captura de pantalla 2023-05-17 a las 12.34.33.png")
+```
+
+**Semilla 12350:**
+
+```{r out.width = "50%", echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Captura de pantalla 2023-05-17 a las 12.45.08.png")
+```
+
+Analizando los resultados en **test**, como suele ser habitual, son un poco peores que los de train. Parece que la **red neuronal con 10 nodos** es la que menor error presenta teniendo en cuenta la aleatoriedad de las semillas. El Random Forest también ofrece buenos resultados a pesar de superar en unas centésimas el error de la red. Como ya se ha comentado, **este proceso se ha repetido con hasta 10 semillas diferentes** y el rango de resultados permanece más o menos **estable** (el $TASE$ general se sitúa siempre **entre 0.05 y 0.1** dependiendo principalmente del tipo de algoritmo).
+
+Ante estos resultados, y a modo de conclusión, yo me quedaría, o con la **red neuronal de 10 nodos** (más complejidad, pero mayor precisión en datos test); o con la **regresión**. Los **modelos clásicos** como la regresión son **menos complejos** que cualquier red neuronal, emplean menos parámetros, y, en este caso, **las diferencias en el error no son tan significativas**. En datos test, la regresión se posiciona con un error del 0.069, mientras que la mejor red neuronal tan solo consigue rebajar a 0.05. **Son tan solo 0.01 puntos de diferencia en el error** a costa de reducir la complejidad del modelo en gran medida. Dependiendo de las características específicas del modelo que se prefiera construir, **podríamos decantarnos por cualquiera de los dos**.
+
+```{r layout="l-body-outset", fig.width=50, fig.asp = .99, echo=FALSE}
+knitr::include_graphics("/Users/leztin/Desktop/Captura de pantalla 2023-05-17 a las 12.30.44.png")
+```
+
+En cuanto a las **curvas ROC** de todos los modelos analizados, se puede observar **cómo son ligeramente inferiores en test respecto a train**, pero aún así ninguna de ellas es **inferior a 0.9**. La selección de variables inicial ofrece resultados muy positivos, al igual que en la primera práctica de R.
+
+# Fase 4: Tabla comparativa básica de todos los modelos construidos
+
+```{r echo=FALSE}
+mod_fin <- data.frame(
+  Modelo = c("Ensamblado", "XGBoost", "Red neuronal tuneada", "Gradient Boosting", "AutoML (GBM)",
+             "SVM Polinomial", "SVM Radial", "Bagging tuneado (500)", "Random Forest", "Reg. logist.",
+             "SVM Lineal", "Reg. logist. - SAS", "Red neuronal tuneada - SAS", "Random Forest - SAS", 
+             "Gradient Boosting - SAS", "SVM Lineal - SAS", "SVM Polinomial - SAS", "SVM Radial -SAS", 
+             "Ensamblado - SAS"),
+  AUC = c(0.9982301, 0.9755202, 0.9754851, 0.9749140, 0.9740230, 0.9667288, 0.9664046, 0.9659226,
+          0.9658791, 0.9612618, 0.9591491, 0.974, 0.987, 0.986, 0.966, 0.972, 0.99, 0.978, 0.978),
+  `Tasa de fallos` = c(0.01925855, 0.08502648, 0.08606644, 0.08521907, 0.07401400, 0.08753009,
+                       0.08444872, 0.09311507, 0.08907078, 0.09066923, 0.09330766, 0.05928, 0.042778, 
+                       0.047719, 0.073318, 0.116015, 0.119534, 0.045321, 0.065439))
+
+mod_fin <- mod_fin |> 
+  arrange(desc(AUC))
+```
+
+```{r layout="l-body-outset"}
+knitr::kable(mod_fin, row.names = FALSE, align = "c")
+```
+
+A modo de conclusión, en la tabla anterior se muestran para su consulta **los resultados de todos los modelos** que se han ido generando **tanto en R como en SAS Miner** sobre este dataset. Como ya se comentó, parece ser que los **modelos en SAS son ligeramente superiores** a los programados en R, a pesar de **presentar un poco más de error** y a estar tuneados con los **mejores hiperparámetros** probados previamente en R.
+
+<CENTER>**¡Muchas gracias por la atención!**</CENTER>
